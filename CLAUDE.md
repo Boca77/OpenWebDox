@@ -69,6 +69,11 @@ cargo fmt --all
   untracked `.cargo/config.toml` (`target-dir`). Never commit that file; never move `target/` back
   into the repo.
 - Windows dev machine; shell commands in docs should work in PowerShell.
+- Never round-trip source files through Windows PowerShell `Get-Content`/`Set-Content`: PS 5.1
+  reads UTF-8 as ANSI and garbles every non-ASCII character (tests contain Arabic, CJK, emoji).
+  Use the editor tools.
+- Bundled fonts live in `fonts/` with their licenses (Noto: SIL OFL 1.1). Tests load them with
+  `include_bytes!`; the library itself embeds no fonts.
 - WASM builds need LLVM (clang + llvm-ar): Loro pulls in C code via `psm`. The local
   `.cargo/config.toml` sets `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown` to the LLVM
   install. Check with `cargo build -p opendox-model --target wasm32-unknown-unknown`.

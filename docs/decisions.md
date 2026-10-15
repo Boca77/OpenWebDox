@@ -31,6 +31,17 @@ Owner's choice. Cargo `target-dir` points outside OneDrive via an untracked
 Maximum adoption: companies can embed it without legal review friction. Rejected AGPL (blocks most
 corporate use) and MIT/Apache-2.0 dual (owner preferred plain MIT).
 
+## D7 — parley for shaping and line breaking (2026-10-15)
+Spike: parley 0.12 vs cosmic-text 0.19, bundled Noto fonts only, six cases (plain wrap, overlong
+word, mixed sizes, Arabic, CJK, ZWJ emoji + combining marks). Line breaks were identical in every
+case. Chose parley because:
+- 2x faster (3.6 ms vs 7.2 ms for a 2000-word paragraph, release build);
+- line height comes from the fonts actually on the line (cosmic-text uses a fixed per-span value);
+- inline boxes (needed for inline images), built-in cursor/selection/hit testing;
+- same Linebender ecosystem as vello, a candidate for M4 glyph drawing.
+Must build layouts with `quantize = false`: with it on, parley snaps metrics to whole units
+(16.34pt lines become 17pt), which would drift page breaks. Risk: 0.x API churn — parley is
+hidden behind opendox-layout's own types.
+
 ## Open
-- Shaping crate — M2 spike.
 - Glyph drawing method — M4 spike.

@@ -16,7 +16,7 @@ or a recorded manual check.
   random order, always converge to identical text; cursor test — a remote insert before a caret
   moves the caret correctly.
 
-## M2 — Paragraph layout (spike + build)
+## M2 — Paragraph layout (spike + build) ✅
 - Spike: shape and line-break one paragraph with parley and with cosmic-text; record choice in
   decisions.md.
 - Bundle one free font family (e.g. Noto Sans / Inter) for tests.
