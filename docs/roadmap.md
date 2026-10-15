@@ -3,12 +3,12 @@
 Work one milestone at a time. A milestone is done only when every done-criterion has a passing test
 or a recorded manual check.
 
-## M0 — Toolchain and skeleton
+## M0 — Toolchain and skeleton ✅
 - Rust stable + MSVC build tools + `wasm32-unknown-unknown` target + wasm-pack installed.
 - Cargo workspace with `opendox-model` and `opendox-layout` crates that build and test.
 - Done: `cargo test --workspace`, `cargo clippy -- -D warnings` and `cargo fmt --check` all pass.
 
-## M1 — Plain-text model on Loro
+## M1 — Plain-text model on Loro ✅
 - `Document` wrapper: insert/delete text at a position, read text, split into paragraphs on `\n`.
 - Stable positions (Loro cursors) for carets that survive remote edits.
 - Grapheme-safe position API.

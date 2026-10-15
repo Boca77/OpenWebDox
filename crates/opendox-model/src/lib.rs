@@ -2,26 +2,16 @@
 //!
 //! Loro is an implementation detail: nothing outside this crate should name Loro types, so the
 //! CRDT can be swapped without touching layout or the editor.
+//!
+//! # Positions
+//!
+//! Every position in this API is a **char index**: a count of Unicode scalar values from the
+//! start of the document. Edits must start and end on grapheme-cluster boundaries, so a caret
+//! can never split a visible character (an emoji, or a letter plus its accent).
 
-#[cfg(test)]
-mod tests {
-    use loro::LoroDoc;
+mod document;
+mod error;
+mod grapheme;
 
-    /// M0 smoke test: Loro builds on this toolchain and two replicas converge.
-    #[test]
-    fn loro_replicas_converge() {
-        let a = LoroDoc::new();
-        let b = LoroDoc::new();
-        a.get_text("body").insert(0, "hello").unwrap();
-        b.get_text("body").insert(0, "world").unwrap();
-
-        b.import(&a.export(loro::ExportMode::all_updates()).unwrap())
-            .unwrap();
-        a.import(&b.export(loro::ExportMode::all_updates()).unwrap())
-            .unwrap();
-
-        let text_a = a.get_text("body").to_string();
-        assert_eq!(text_a, b.get_text("body").to_string());
-        assert_eq!(text_a.len(), 10);
-    }
-}
+pub use document::{Anchor, Document, Paragraph, Version};
+pub use error::ModelError;
