@@ -27,7 +27,10 @@ Cargo workspace + npm workspaces in one repo, published as separate crates/packa
 Owner's choice. Cargo `target-dir` points outside OneDrive via an untracked
 `.cargo/config.toml`. `node_modules` will still sync; keep JS dependencies minimal.
 
+## D6 — MIT license (2026-10-15)
+Maximum adoption: companies can embed it without legal review friction. Rejected AGPL (blocks most
+corporate use) and MIT/Apache-2.0 dual (owner preferred plain MIT).
+
 ## Open
-- License (MIT/Apache-2.0 vs AGPL) — must be decided before accepting outside contributions.
 - Shaping crate — M2 spike.
 - Glyph drawing method — M4 spike.
