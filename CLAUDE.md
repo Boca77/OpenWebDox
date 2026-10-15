@@ -1,0 +1,74 @@
+# opendox
+
+Open-source collaborative document editor library (Google Docs class). Real-time sync,
+paginated print-accurate layout. Layout quality is the product: treat it as the top priority.
+
+## Architecture (decided — see docs/decisions.md before changing any of it)
+
+- **Rust core, compiled to WASM for the browser and native for the server.** Same crates on both
+  sides so layout and sync behave identically everywhere.
+- **CRDT: Loro.** Do not write custom CRDT/sequence logic. Formatting uses Loro rich-text marks
+  (Peritext-style ranges), never per-character attributes.
+- **Text shaping in Rust with bundled fonts.** Never use browser `measureText`/`fillText` for
+  layout or glyph placement. The renderer draws glyphs at the positions Rust computed.
+- **Monorepo, many packages.** Cargo workspace in `crates/`, npm workspaces in `packages/`.
+
+```
+crates/
+  opendox-model    document model on top of Loro (text, paragraphs, marks, positions)
+  opendox-layout   shaping, line breaking, pagination, hit testing — no Loro dependency
+  opendox-wasm     wasm-bindgen bindings for model + layout
+  opendox-server   WebSocket sync server (later)
+packages/
+  editor           TS: canvas renderer, input (hidden textarea, IME), selection
+docs/
+  roadmap.md       milestones and done-criteria — work milestone by milestone
+  decisions.md     decision log — append, never rewrite history
+```
+
+`opendox-layout` must not depend on Loro or `opendox-model`. It takes plain paragraphs + style runs
+in and returns geometry out, so it can be tested and reused in isolation.
+
+## Layout rules
+
+- Internal unit is **points (pt)** as `f32`. Convert to device pixels only in the renderer
+  (zoom × devicePixelRatio). Shape at the font's design units / a fixed reference size.
+- Output is **glyph runs** with cluster → text-offset mapping, not per-character boxes.
+- Line breaking follows UAX #14, never "split on spaces". Overlong words must break, not overflow.
+- Text positions exposed to callers are **grapheme-cluster safe**: never place a cursor inside a
+  grapheme. Be explicit about units (UTF-8 bytes, UTF-16 units, graphemes) in names and docs.
+- Layout is cached **per paragraph**; pagination restacks cached paragraph heights.
+
+## Conventions
+
+- Rust edition 2021, stable toolchain. `cargo fmt` and `cargo clippy -- -D warnings` clean.
+- No `unsafe` without a `// SAFETY:` comment and a reason in the PR.
+- Public APIs get doc comments. Internal code: comment the why, not the what.
+- Errors: `thiserror` in libraries; no `unwrap()`/`expect()` outside tests except on proven invariants
+  (comment the invariant).
+
+## Testing
+
+- Every milestone ships with tests that prove its done-criteria (see roadmap).
+- Model: property/fuzz tests that apply random concurrent edits on N replicas and assert they converge.
+- Layout: golden tests (input text + width → expected line breaks / page breaks) using the bundled
+  fonts only, so results are identical on every machine.
+
+## Commands
+
+```
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+```
+
+## Environment notes
+
+- The repo sits inside OneDrive. Cargo's build output is redirected outside OneDrive by a local,
+  untracked `.cargo/config.toml` (`target-dir`). Never commit that file; never move `target/` back
+  into the repo.
+- Windows dev machine; shell commands in docs should work in PowerShell.
+- WASM builds need LLVM (clang + llvm-ar): Loro pulls in C code via `psm`. The local
+  `.cargo/config.toml` sets `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown` to the LLVM
+  install. Check with `cargo build -p opendox-model --target wasm32-unknown-unknown`.

@@ -1,0 +1,7 @@
+/target/
+.cargo/config.toml
+node_modules/
+dist/
+pkg/
+*.log
+.DS_Store

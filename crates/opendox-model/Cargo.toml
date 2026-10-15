@@ -1,0 +1,13 @@
+[package]
+name = "opendox-model"
+description = "opendox document model built on the Loro CRDT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+loro.workspace = true
+
+[lints]
+workspace = true
