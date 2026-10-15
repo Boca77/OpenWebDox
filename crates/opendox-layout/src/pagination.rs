@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
+use crate::fonts::FontId;
 use crate::paragraph::{LayoutEngine, ParagraphLayout, StyleSpan, TextStyle};
 
 /// Page size and margins, in points.
@@ -73,6 +74,18 @@ pub struct Fragment {
     pub lines: Range<usize>,
     /// Y of the fragment's first line top, measured from the top edge of the page.
     pub top: f32,
+}
+
+/// A glyph positioned on a page: `(x, y)` is its baseline origin in points from the page's
+/// top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedGlyph {
+    pub font: FontId,
+    pub face_index: u32,
+    pub font_size: f32,
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Lays out a whole document onto pages, caching paragraph layouts between calls.
@@ -149,6 +162,37 @@ impl Paginator {
     /// How many paragraphs the last call had to shape (the rest came from the cache).
     pub fn last_shaped_count(&self) -> usize {
         self.last_shaped
+    }
+
+    /// Every glyph on page `index`, positioned in points from the page's top-left corner.
+    pub fn placed_glyphs(&self, index: usize) -> Vec<PlacedGlyph> {
+        let mut out = Vec::new();
+        let Some(page) = self.pages.get(index) else {
+            return out;
+        };
+        let left = self.geometry.margin_left;
+        for f in &page.fragments {
+            let Some(para) = self.paragraph(f.paragraph) else {
+                continue;
+            };
+            let Some(first) = para.lines.get(f.lines.start) else {
+                continue;
+            };
+            let dy = f.top - first.top;
+            for line in &para.lines[f.lines.clone()] {
+                for run in &line.runs {
+                    out.extend(run.glyphs.iter().map(|g| PlacedGlyph {
+                        font: run.font,
+                        face_index: run.face_index,
+                        font_size: run.font_size,
+                        id: g.id,
+                        x: left + g.x,
+                        y: dy + g.y,
+                    }));
+                }
+            }
+        }
+        out
     }
 
     fn stack(&self) -> Vec<Page> {

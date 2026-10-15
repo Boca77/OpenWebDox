@@ -43,5 +43,14 @@ Must build layouts with `quantize = false`: with it on, parley snaps metrics to 
 (16.34pt lines become 17pt), which would drift page breaks. Risk: 0.x API churn — parley is
 hidden behind opendox-layout's own types.
 
+## D8 — Draw glyphs as cached Path2D outlines on canvas (2026-10-15)
+Rust (skrifa) extracts each glyph's outline as SVG path data in font units; the renderer caches
+one `Path2D` per glyph and fills it at the position layout computed. The browser's text engine is
+never used. Measured in headless Chrome, 3 Letter pages / 7,184 glyphs: first draw 49 ms (builds
+the path cache), redraw 4-5 ms at 100% and 200% zoom. Fast enough that a glyph atlas (more
+complex, blurry when zoomed) isn't needed. Chrome and Edge screenshots were byte-identical.
+Known limits: no hinting, so small text is slightly softer than native text; colour emoji
+(COLR/CBDT) can't be drawn this way and need separate handling.
+
 ## Open
-- Glyph drawing method — M4 spike.
+- Colour emoji rendering.

@@ -1,0 +1,13 @@
+{
+  "name": "opendox-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/opendox-wasm --target web --release",
+    "build": "npm run build:wasm && npm run build -w @opendox/editor",
+    "serve": "node scripts/serve.mjs"
+  }
+}

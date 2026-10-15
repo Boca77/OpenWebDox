@@ -30,7 +30,8 @@ or a recorded manual check.
   pages at line boundaries. Per-paragraph cache; edit re-lays out one paragraph and restacks.
 - Done: golden page-break tests; test that editing paragraph N re-shapes only paragraph N.
 
-## M4 — Browser rendering
+## M4 — Browser rendering ✅
+Firefox not checked yet (not installed on the dev machine); Chrome and Edge match.
 - `opendox-wasm` bindings; `packages/editor` draws pages on canvas from Rust glyph positions.
 - Spike glyph drawing (Path2D outlines vs atlas); record choice.
 - Done: demo page renders a multi-page doc; screenshot matches across Chrome and Firefox.
@@ -51,6 +52,9 @@ or a recorded manual check.
 ## Known debt
 - `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
   now; must become per-paragraph before large documents are usable.
+- WASM bundle is 3.0 MB (mostly Loro), not size-tuned yet (no LTO / opt-level "z").
+- Renderer draws every page on every render; should draw only pages in view.
+- No emoji or CJK font bundled: those characters render as empty boxes (layout is correct).
 - Pagination restacks every line on every call. Cheap (arithmetic only), but could stop early
   once page breaks match the previous pass.
 

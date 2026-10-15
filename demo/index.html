@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>opendox render demo</title>
+    <style>
+      :root {
+        --canvas-bg: #e6e8ec;
+        --bar-bg: #f7f8fa;
+        --hairline: #c9cdd4;
+        --text: #1d2129;
+        --text-muted: #4a515c;
+        --page-shadow: 0 1px 3px rgb(40 48 64 / 0.18);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        background: var(--canvas-bg);
+        color: var(--text);
+        font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 20px;
+        padding: 8px 16px;
+        background: var(--bar-bg);
+        border-bottom: 1px solid var(--hairline);
+      }
+      h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      #stats {
+        margin: 0;
+        display: flex;
+        gap: 16px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      #stats dt {
+        display: inline;
+      }
+      #stats dd {
+        display: inline;
+        margin: 0 0 0 4px;
+        color: var(--text);
+        font-weight: 600;
+      }
+      label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+        color: var(--text-muted);
+      }
+      select {
+        min-height: 32px;
+        font: inherit;
+        color: var(--text);
+        background: #fff;
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+        padding: 0 6px;
+      }
+      select:focus-visible {
+        outline: 2px solid #2f5bd3;
+        outline-offset: 1px;
+      }
+      #pages {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 16px;
+      }
+      .opendox-page {
+        display: block;
+        max-width: none;
+        box-shadow: var(--page-shadow);
+      }
+      #error {
+        margin: 16px;
+        color: #9b1c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>opendox render demo</h1>
+      <dl id="stats" aria-live="polite">
+        <div><dt>Pages</dt><dd id="s-pages">–</dd></div>
+        <div><dt>Glyphs</dt><dd id="s-glyphs">–</dd></div>
+        <div><dt>Layout</dt><dd id="s-layout">–</dd></div>
+        <div><dt>Render</dt><dd id="s-render">–</dd></div>
+      </dl>
+      <label>
+        Zoom
+        <select id="zoom">
+          <option value="0.75">75%</option>
+          <option value="1" selected>100%</option>
+          <option value="1.5">150%</option>
+          <option value="2">200%</option>
+        </select>
+      </label>
+    </header>
+    <main id="pages" aria-label="Document pages"></main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

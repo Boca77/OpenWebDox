@@ -21,6 +21,8 @@ crates/
   opendox-server   WebSocket sync server (later)
 packages/
   editor           TS: canvas renderer, input (hidden textarea, IME), selection
+demo/              dev harness page (plain ES modules, no bundler)
+scripts/serve.mjs  zero-dependency static server for the demo
 docs/
   roadmap.md       milestones and done-criteria — work milestone by milestone
   decisions.md     decision log — append, never rewrite history
@@ -61,7 +63,15 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+
+npm install            # once
+npm run build          # wasm-pack build of opendox-wasm + tsc for packages/editor
+npm run serve          # demo at http://127.0.0.1:5174/demo/
 ```
+
+Headless screenshots for visual checks:
+`chrome.exe --headless=new --window-size=900,1150 --virtual-time-budget=10000 --screenshot=<png> http://127.0.0.1:5174/demo/`.
+Virtual time freezes `performance.now()`, so timings shown in such screenshots read 0 ms.
 
 ## Environment notes
 

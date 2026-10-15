@@ -1,0 +1,18 @@
+{
+  "name": "@opendox/editor",
+  "version": "0.0.0",
+  "description": "Canvas renderer and input layer for opendox",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

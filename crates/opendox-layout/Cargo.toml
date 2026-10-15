@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 # Default features pull in system font discovery, which would make layout machine-dependent.
 parley = { workspace = true, default-features = false, features = ["std"] }
+skrifa.workspace = true
 
 [lints]
 workspace = true

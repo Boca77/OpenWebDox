@@ -13,6 +13,6 @@ mod fonts;
 mod pagination;
 mod paragraph;
 
-pub use fonts::{FontId, FontLibrary};
-pub use pagination::{Fragment, Page, PageGeometry, Paginator, ParagraphInput};
+pub use fonts::{FontId, FontLibrary, GlyphOutline};
+pub use pagination::{Fragment, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph};
 pub use paragraph::{Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, StyleSpan, TextStyle};

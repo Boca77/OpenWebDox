@@ -1127,6 +1127,7 @@ name = "opendox-layout"
 version = "0.0.0"
 dependencies = [
  "parley",
+ "skrifa",
 ]
 
 [[package]]
@@ -1137,6 +1138,15 @@ dependencies = [
  "proptest",
  "thiserror 2.0.21",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "opendox-wasm"
+version = "0.0.0"
+dependencies = [
+ "opendox-layout",
+ "opendox-model",
+ "wasm-bindgen",
 ]
 
 [[package]]

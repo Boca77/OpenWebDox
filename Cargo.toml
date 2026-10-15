@@ -15,6 +15,11 @@ thiserror = "2.0.21"
 unicode-segmentation = "1.13.3"
 proptest = "1.12.0"
 parley = { version = "0.12.0", default-features = false }
+# Same version parley uses internally, so it isn't compiled twice.
+skrifa = "0.44.0"
+wasm-bindgen = "0.2.129"
+opendox-model = { path = "crates/opendox-model" }
+opendox-layout = { path = "crates/opendox-layout" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

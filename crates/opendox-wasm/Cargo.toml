@@ -1,0 +1,18 @@
+[package]
+name = "opendox-wasm"
+description = "WebAssembly bindings for the opendox document model and layout engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+opendox-model.workspace = true
+opendox-layout.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true
