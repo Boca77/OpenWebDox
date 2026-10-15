@@ -25,7 +25,7 @@ or a recorded manual check.
 - Done: golden tests for wrapping (normal text, overlong word, mixed font sizes, CJK, emoji), stable
   across machines.
 
-## M3 — Pagination
+## M3 — Pagination ✅
 - Page geometry (size, margins in pt). Stack paragraph layouts into pages; split paragraphs across
   pages at line boundaries. Per-paragraph cache; edit re-lays out one paragraph and restacks.
 - Done: golden page-break tests; test that editing paragraph N re-shapes only paragraph N.
@@ -47,6 +47,12 @@ or a recorded manual check.
 
 ## M7 — Rich text and undo
 - Bold/italic/size/font marks, paragraph attributes (alignment, spacing), local-only undo/redo.
+
+## Known debt
+- `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
+  now; must become per-paragraph before large documents are usable.
+- Pagination restacks every line on every call. Cheap (arithmetic only), but could stop early
+  once page breaks match the previous pass.
 
 ## Later
 Lists and numbering, tables, images, headers/footers, footnotes, bidi, comments/suggestions,
