@@ -36,7 +36,9 @@ Firefox not checked yet (not installed on the dev machine); Chrome and Edge matc
 - Spike glyph drawing (Path2D outlines vs atlas); record choice.
 - Done: demo page renders a multi-page doc; screenshot matches across Chrome and Firefox.
 
-## M5 — Hit testing, caret, input
+## M5 — Hit testing, caret, input ✅
+IME tested with simulated composition events (CDP `Input.imeSetComposition`), not yet with a real
+OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji deletion.
 - Point → text position (with line-wrap affinity), caret drawing, selection, arrow keys with goal-x.
 - Hidden textarea input incl. IME composition.
 - Done: tests for hit testing edge cases (margins, between lines, between pages); manual IME check.
@@ -55,7 +57,14 @@ Firefox not checked yet (not installed on the dev machine); Chrome and Edge matc
 - WASM bundle is 3.0 MB (mostly Loro), not size-tuned yet (no LTO / opt-level "z").
 - Renderer draws every page on every render; should draw only pages in view.
 - No emoji or CJK font bundled: those characters render as empty boxes (layout is correct).
-- Pagination restacks every line on every call. Cheap (arithmetic only), but could stop early
+- Pagination restacks every line on every call.
+- Editing gaps: no undo (M7), no Ctrl+Arrow word movement, no double/triple-click selection, no
+  rich clipboard (plain text only).
+- Arrow keys move in logical order; in right-to-left text Left/Right feel reversed. Visual
+  movement for bidi text is still to do.
+- Every keystroke redraws every page (about 1.5 ms per page); should redraw only changed,
+  visible pages.
+- The editor injects its own stylesheet; apps can't theme the caret/selection yet. Cheap (arithmetic only), but could stop early
   once page breaks match the previous pass.
 
 ## Later

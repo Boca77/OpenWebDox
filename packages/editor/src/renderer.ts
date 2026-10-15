@@ -26,15 +26,18 @@ export interface RenderStats {
 }
 
 /**
- * Draws laid-out pages onto one canvas per page.
+ * Draws laid-out pages, one canvas per page.
  *
  * Glyphs are filled as vector paths at the exact positions the Rust layout computed, so the
  * browser's own text shaping never runs and every browser draws the same thing.
+ *
+ * Each page is a `.opendox-page` element holding the canvas and an empty `.opendox-overlay`
+ * layer above it, where callers can place carets and selection boxes without redrawing text.
  */
 export class PageRenderer {
   private readonly paths = new Map<string, Path2D | null>();
   private readonly emSizes = new Map<string, number>();
-  private readonly canvases: HTMLCanvasElement[] = [];
+  private readonly pageEls: HTMLElement[] = [];
 
   constructor(
     private readonly source: LayoutSource,
@@ -42,31 +45,52 @@ export class PageRenderer {
     public zoom = 1,
   ) {}
 
-  /** Draws pages `0..pageCount`, reusing canvases from the previous call. */
+  /** CSS pixels per point at the current zoom. */
+  get cssPerPt(): number {
+    return PX_PER_PT * this.zoom;
+  }
+
+  /** Page elements from the last render. */
+  get pages(): readonly HTMLElement[] {
+    return this.pageEls;
+  }
+
+  overlay(page: number): HTMLElement | undefined {
+    return this.pageEls[page]?.querySelector<HTMLElement>(".opendox-overlay") ?? undefined;
+  }
+
+  /** Draws pages `0..pageCount`, reusing page elements from the previous call. */
   render(pageCount: number): RenderStats {
     const start = performance.now();
-    while (this.canvases.length > pageCount) {
-      this.canvases.pop()?.remove();
+    while (this.pageEls.length > pageCount) {
+      this.pageEls.pop()?.remove();
     }
-    while (this.canvases.length < pageCount) {
+    while (this.pageEls.length < pageCount) {
+      const page = document.createElement("div");
+      page.className = "opendox-page";
+      page.dataset.page = String(this.pageEls.length);
+      page.style.position = "relative";
       const canvas = document.createElement("canvas");
-      canvas.className = "opendox-page";
       canvas.setAttribute("aria-hidden", "true");
-      this.container.append(canvas);
-      this.canvases.push(canvas);
+      canvas.style.display = "block";
+      const overlay = document.createElement("div");
+      overlay.className = "opendox-overlay";
+      overlay.style.cssText = "position:absolute;inset:0;pointer-events:none;";
+      page.append(canvas, overlay);
+      this.container.append(page);
+      this.pageEls.push(page);
     }
     let glyphs = 0;
-    this.canvases.forEach((canvas, i) => {
-      glyphs += this.drawPage(canvas, i);
+    this.pageEls.forEach((page, i) => {
+      glyphs += this.drawPage(page.querySelector("canvas")!, i);
     });
     return { pages: pageCount, glyphs, ms: performance.now() - start };
   }
 
   private drawPage(canvas: HTMLCanvasElement, index: number): number {
     const dpr = window.devicePixelRatio || 1;
-    const cssPerPt = PX_PER_PT * this.zoom;
-    const widthPx = Math.round(this.source.page_width() * cssPerPt * dpr);
-    const heightPx = Math.round(this.source.page_height() * cssPerPt * dpr);
+    const widthPx = Math.round(this.source.page_width() * this.cssPerPt * dpr);
+    const heightPx = Math.round(this.source.page_height() * this.cssPerPt * dpr);
     canvas.width = widthPx;
     canvas.height = heightPx;
     canvas.style.width = `${widthPx / dpr}px`;
@@ -74,7 +98,7 @@ export class PageRenderer {
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return 0;
-    const devicePerPt = cssPerPt * dpr;
+    const devicePerPt = this.cssPerPt * dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, widthPx, heightPx);

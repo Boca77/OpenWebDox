@@ -67,6 +67,7 @@ cargo fmt --all
 npm install            # once
 npm run build          # wasm-pack build of opendox-wasm + tsc for packages/editor
 npm run serve          # demo at http://127.0.0.1:5174/demo/
+npm run e2e            # browser interaction checks (needs serve running)
 ```
 
 Headless screenshots for visual checks:

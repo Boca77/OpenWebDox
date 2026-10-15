@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use crate::fonts::FontId;
+use crate::navigation::PlacedLine;
 use crate::paragraph::{LayoutEngine, ParagraphLayout, StyleSpan, TextStyle};
 
 /// Page size and margins, in points.
@@ -98,7 +99,17 @@ pub struct Paginator {
     cache: HashMap<u64, ParagraphLayout>,
     keys: Vec<u64>,
     pages: Vec<Page>,
+    /// Every line in document order with its page position; navigation walks this.
+    pub(crate) lines: Vec<PlacedLine>,
+    /// Index into `lines` of each paragraph's first line.
+    pub(crate) first_line: Vec<usize>,
     last_shaped: usize,
+}
+
+struct Stacked {
+    pages: Vec<Page>,
+    lines: Vec<PlacedLine>,
+    first_line: Vec<usize>,
 }
 
 impl Paginator {
@@ -108,6 +119,8 @@ impl Paginator {
             cache: HashMap::new(),
             keys: Vec::new(),
             pages: Vec::new(),
+            lines: Vec::new(),
+            first_line: Vec::new(),
             last_shaped: 0,
         }
     }
@@ -145,7 +158,10 @@ impl Paginator {
         }
         // Dropping entries not used this pass keeps memory proportional to the document.
         self.cache = fresh;
-        self.pages = self.stack();
+        let stacked = self.stack();
+        self.pages = stacked.pages;
+        self.lines = stacked.lines;
+        self.first_line = stacked.first_line;
         &self.pages
     }
 
@@ -195,15 +211,20 @@ impl Paginator {
         out
     }
 
-    fn stack(&self) -> Vec<Page> {
+    fn stack(&self) -> Stacked {
         let g = &self.geometry;
         let bottom_limit = g.margin_top + g.content_height();
-        let mut pages = vec![Page {
-            fragments: Vec::new(),
-        }];
+        let mut out = Stacked {
+            pages: vec![Page {
+                fragments: Vec::new(),
+            }],
+            lines: Vec::new(),
+            first_line: Vec::with_capacity(self.keys.len()),
+        };
         let mut y = g.margin_top;
 
         for (index, key) in self.keys.iter().enumerate() {
+            out.first_line.push(out.lines.len());
             let Some(para) = self.cache.get(key) else {
                 continue;
             };
@@ -213,18 +234,25 @@ impl Paginator {
                 // Break only if something is already on the page: a line taller than a whole
                 // page is placed on an empty page rather than pushed forward forever.
                 if y + h > bottom_limit && y > g.margin_top {
-                    push_fragment(&mut pages, index, start..i, y, para);
-                    pages.push(Page {
+                    push_fragment(&mut out.pages, index, start..i, y, para);
+                    out.pages.push(Page {
                         fragments: Vec::new(),
                     });
                     y = g.margin_top;
                     start = i;
                 }
+                out.lines.push(PlacedLine {
+                    page: out.pages.len() - 1,
+                    paragraph: index,
+                    line: i,
+                    top: y,
+                    bottom: y + h,
+                });
                 y += h;
             }
-            push_fragment(&mut pages, index, start..para.lines.len(), y, para);
+            push_fragment(&mut out.pages, index, start..para.lines.len(), y, para);
         }
-        pages
+        out
     }
 }
 

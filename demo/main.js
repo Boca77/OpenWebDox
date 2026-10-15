@@ -1,5 +1,5 @@
 import init, { Editor } from "../crates/opendox-wasm/pkg/opendox_wasm.js";
-import { PageRenderer } from "../packages/editor/dist/index.js";
+import { EditorView } from "../packages/editor/dist/index.js";
 
 const FONTS = [
   "../fonts/noto/NotoSans-Regular.ttf",
@@ -32,25 +32,21 @@ async function main() {
   for (let i = 1; i <= 4; i++) sections.push(`Section ${i}`, ...ALICE);
   editor.insert(0, sections.join("\n"));
 
-  const t0 = performance.now();
-  const pageCount = editor.layout();
-  const layoutMs = performance.now() - t0;
-
-  const renderer = new PageRenderer(editor, $("pages"));
-  const draw = () => {
-    const stats = renderer.render(pageCount);
-    $("s-pages").textContent = String(stats.pages);
-    $("s-glyphs").textContent = stats.glyphs.toLocaleString();
+  const showStats = ({ layoutMs, render }) => {
+    $("s-pages").textContent = String(render.pages);
+    $("s-glyphs").textContent = render.glyphs.toLocaleString();
     $("s-layout").textContent = `${layoutMs.toFixed(1)} ms`;
-    $("s-render").textContent = `${stats.ms.toFixed(1)} ms`;
+    $("s-render").textContent = `${render.ms.toFixed(1)} ms`;
   };
-  draw();
+  const view = new EditorView(editor, $("pages"));
+  view.onUpdate = showStats;
+  view.relayout();
+  view.focusEditor();
 
-  $("zoom").addEventListener("change", (e) => {
-    renderer.zoom = Number(e.target.value);
-    draw();
-  });
+  $("zoom").addEventListener("change", (e) => view.setZoom(Number(e.target.value)));
 
+  // Exposed for automated browser checks.
+  window.opendox = { editor, view };
   document.body.dataset.ready = "true";
 }
 

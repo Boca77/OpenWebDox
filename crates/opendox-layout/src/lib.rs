@@ -10,9 +10,13 @@
 //! Text offsets in this crate are **UTF-8 byte offsets** into the paragraph text.
 
 mod fonts;
+mod navigation;
 mod pagination;
 mod paragraph;
 
 pub use fonts::{FontId, FontLibrary, GlyphOutline};
+pub use navigation::{CaretRect, PlacedLine, SelectionRect, TextPosition};
 pub use pagination::{Fragment, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph};
-pub use paragraph::{Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, StyleSpan, TextStyle};
+pub use paragraph::{
+    CaretStop, Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, StyleSpan, TextStyle,
+};

@@ -48,6 +48,41 @@ pub struct Line {
     pub advance: f32,
     /// Glyph runs in visual (left-to-right) order.
     pub runs: Vec<GlyphRun>,
+    /// Every place a caret can sit on this line, left to right. Never empty.
+    pub carets: Vec<CaretStop>,
+}
+
+/// A caret position on a line: a grapheme boundary and its x coordinate.
+///
+/// In mixed-direction text one offset can appear twice (once at each visual edge where the
+/// directions meet); lookups by offset use the first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaretStop {
+    pub byte: usize,
+    pub x: f32,
+}
+
+impl Line {
+    /// X of the caret at `byte`, or of the nearest stop before it.
+    pub fn caret_x(&self, byte: usize) -> f32 {
+        if let Some(stop) = self.carets.iter().find(|s| s.byte == byte) {
+            return stop.x;
+        }
+        self.carets
+            .iter()
+            .filter(|s| s.byte <= byte)
+            .max_by_key(|s| s.byte)
+            .or(self.carets.first())
+            .map_or(0.0, |s| s.x)
+    }
+
+    /// The caret offset closest to `x`.
+    pub fn offset_at(&self, x: f32) -> usize {
+        self.carets
+            .iter()
+            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+            .map_or(self.byte_range.start, |s| s.byte)
+    }
 }
 
 /// Glyphs that share one font and size.
@@ -163,6 +198,7 @@ impl LayoutEngine {
                     baseline: m.baseline,
                     advance: m.advance,
                     runs,
+                    carets: caret_stops(&line),
                 }
             })
             .collect();
@@ -173,4 +209,37 @@ impl LayoutEngine {
             lines,
         }
     }
+}
+
+/// Walks the line's clusters in visual order, recording the offset at each cluster edge.
+fn caret_stops(line: &parley::Line<'_, ()>) -> Vec<CaretStop> {
+    let mut stops: Vec<CaretStop> = Vec::new();
+    let mut x = line.metrics().offset;
+    let mut push = |byte: usize, x: f32| {
+        if stops.last().is_none_or(|s| s.byte != byte || s.x != x) {
+            stops.push(CaretStop { byte, x });
+        }
+    };
+    for run in line.runs() {
+        for cluster in run.visual_clusters() {
+            let r = cluster.text_range();
+            let right = x + cluster.advance();
+            // A right-to-left cluster starts (logically) at its right edge.
+            let (left_byte, right_byte) = if cluster.is_rtl() {
+                (r.end, r.start)
+            } else {
+                (r.start, r.end)
+            };
+            push(left_byte, x);
+            push(right_byte, right);
+            x = right;
+        }
+    }
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            byte: line.text_range().start,
+            x: line.metrics().offset,
+        });
+    }
+    stops
 }
