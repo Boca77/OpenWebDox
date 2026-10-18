@@ -171,6 +171,16 @@ await b.clickAt(cell);
 await b.type("cell");
 check("cell text reaches A", await until(async () => (await a.text()) === (await b.text()) && (await a.text()).includes("cell")));
 
+// 7b. Formatting syncs: A bolds and centres its first paragraph, B draws it that way.
+await a.ev("(() => { const v = window.opendox.view; v.anchor = 0; v.focus = 5; v.toggleBold(); v.setAlign('center'); })()");
+check(
+  "bold and centring reach B",
+  await until(async () => {
+    const fonts = await b.ev("(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set(); for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s]; })()");
+    return fonts.includes(1) && (await b.ev("window.opendox.editor.paragraph_format(0)[0]")) === 1;
+  }),
+);
+
 // 8. Reloading B restores the document from the server.
 const expected = await a.text();
 await b.send("Page.reload");

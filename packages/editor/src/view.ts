@@ -36,6 +36,47 @@ export interface EditorEngine extends LayoutSource {
   table_delete_row(pos: number): number;
   table_delete_column(pos: number): number;
   table_delete(pos: number): number;
+  set_bold(anchor: number, focus: number, on: boolean): void;
+  set_italic(anchor: number, focus: number, on: boolean): void;
+  /** Points; 0 = default size. */
+  set_font_size(anchor: number, focus: number, size: number): void;
+  /** Family name; "" = default font. */
+  set_font(anchor: number, focus: number, family: string): void;
+  /** `[bold, italic, size]`, size 0 = default */
+  char_format(anchor: number, focus: number): Float32Array;
+  char_font(anchor: number, focus: number): string;
+  /** 0 left, 1 centre, 2 right, 3 justify */
+  set_align(anchor: number, focus: number, align: number): void;
+  set_line_spacing(anchor: number, focus: number, spacing: number): void;
+  set_space_before(anchor: number, focus: number, pt: number): void;
+  set_space_after(anchor: number, focus: number, pt: number): void;
+  /** `[align, line spacing, space before, space after]` */
+  paragraph_format(pos: number): Float32Array;
+  /** The selection to restore as `[anchor, focus]`, or undefined if there was nothing. */
+  undo(anchor: number, focus: number): Uint32Array | undefined;
+  redo(anchor: number, focus: number): Uint32Array | undefined;
+  can_undo(): boolean;
+  can_redo(): boolean;
+  clear_history(): void;
+}
+
+export type Alignment = "left" | "center" | "right" | "justify";
+const ALIGNMENTS: Alignment[] = ["left", "center", "right", "justify"];
+
+/** Formatting at the caret or selection, for toolbars. */
+export interface FormatState {
+  bold: boolean;
+  italic: boolean;
+  /** Points; `null` = the document default. */
+  size: number | null;
+  /** Family name; `null` = the document default. */
+  font: string | null;
+  align: Alignment;
+  lineSpacing: number;
+  spaceBefore: number;
+  spaceAfter: number;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface EditStats {
@@ -239,6 +280,93 @@ export class EditorView {
     this.edited();
   }
 
+  // --- formatting and undo ----------------------------------------------------------------
+
+  /** Formatting at the caret or across the selection. */
+  formatState(): FormatState {
+    const e = this.engine;
+    const [bold, italic, size] = e.char_format(this.anchor, this.focus);
+    const font = e.char_font(this.anchor, this.focus);
+    const [align, lineSpacing, spaceBefore, spaceAfter] = e.paragraph_format(this.focus);
+    return {
+      bold: bold === 1,
+      italic: italic === 1,
+      size: size > 0 ? size : null,
+      font: font || null,
+      align: ALIGNMENTS[align] ?? "left",
+      lineSpacing: Math.round(lineSpacing * 100) / 100,
+      spaceBefore,
+      spaceAfter,
+      canUndo: e.can_undo(),
+      canRedo: e.can_redo(),
+    };
+  }
+
+  /** Toggles bold on the selection; at a caret, for the next text typed there. */
+  toggleBold(): void {
+    this.format((a, f) => this.engine.set_bold(a, f, !this.formatState().bold));
+  }
+
+  toggleItalic(): void {
+    this.format((a, f) => this.engine.set_italic(a, f, !this.formatState().italic));
+  }
+
+  /** Font size in points; `null` for the default. */
+  setFontSize(size: number | null): void {
+    this.format((a, f) => this.engine.set_font_size(a, f, size ?? 0));
+  }
+
+  /** Font family; `null` for the default. */
+  setFont(family: string | null): void {
+    this.format((a, f) => this.engine.set_font(a, f, family ?? ""));
+  }
+
+  setAlign(align: Alignment): void {
+    this.engine.set_align(this.anchor, this.focus, ALIGNMENTS.indexOf(align));
+    this.edited();
+  }
+
+  /** Multiple of single spacing: 1, 1.15, 1.5, 2 … */
+  setLineSpacing(spacing: number): void {
+    this.engine.set_line_spacing(this.anchor, this.focus, spacing);
+    this.edited();
+  }
+
+  /** Space before and after the selected paragraphs, in points. */
+  setParagraphSpacing(before: number, after: number): void {
+    this.engine.set_space_before(this.anchor, this.focus, before);
+    this.engine.set_space_after(this.anchor, this.focus, after);
+    this.edited();
+  }
+
+  /** Undoes this user's last change; other people's edits are never undone. */
+  undo(): void {
+    this.history(this.engine.undo(this.anchor, this.focus));
+  }
+
+  redo(): void {
+    this.history(this.engine.redo(this.anchor, this.focus));
+  }
+
+  /**
+   * A character format command. With a selection it's an edit; at a caret it only changes
+   * what typing will produce, so just the toolbar state needs refreshing.
+   */
+  private format(apply: (anchor: number, focus: number) => void): void {
+    apply(this.anchor, this.focus);
+    if (this.anchor !== this.focus) this.edited();
+    else this.drawSelection();
+  }
+
+  private history(sel: Uint32Array | undefined): void {
+    if (!sel) return;
+    this.anchor = sel[0];
+    this.focus = sel[1];
+    this.upstream = false;
+    this.goalX = null;
+    this.edited();
+  }
+
   /** Lays out, redraws pages and the caret. Call after changing the document from outside. */
   relayout(): void {
     const t0 = performance.now();
@@ -315,6 +443,10 @@ export class EditorView {
     if (this.composing || e.isComposing) return;
     const mod = e.ctrlKey || e.metaKey;
     const extend = e.shiftKey;
+    if (mod && !e.altKey && this.onShortcut(e.key.toLowerCase(), e.shiftKey)) {
+      e.preventDefault();
+      return;
+    }
     switch (e.key) {
       case "ArrowLeft":
         this.moveHorizontal(false, extend);
@@ -360,6 +492,26 @@ export class EditorView {
         return;
     }
     e.preventDefault();
+  }
+
+  /** Ctrl/Cmd shortcuts, as in Google Docs. Returns whether `key` was one. */
+  private onShortcut(key: string, shift: boolean): boolean {
+    const aligns: Record<string, Alignment> = { l: "left", e: "center", r: "right", j: "justify" };
+    if (shift && key in aligns) {
+      this.setAlign(aligns[key]);
+    } else if (key === "z") {
+      if (shift) this.redo();
+      else this.undo();
+    } else if (key === "y" && !shift) {
+      this.redo();
+    } else if (key === "b" && !shift) {
+      this.toggleBold();
+    } else if (key === "i" && !shift) {
+      this.toggleItalic();
+    } else {
+      return false;
+    }
+    return true;
   }
 
   private moveHorizontal(forward: boolean, extend: boolean): void {

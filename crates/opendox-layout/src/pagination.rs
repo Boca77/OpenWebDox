@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use crate::fonts::FontId;
 use crate::navigation::{PlacedLine, Rect};
-use crate::paragraph::{LayoutEngine, ParagraphLayout, StyleSpan, TextStyle};
+use crate::paragraph::{LayoutEngine, ParagraphLayout, ParagraphStyle, StyleSpan, TextStyle};
 
 /// Space between a cell's border and its text, in points.
 pub const CELL_PADDING: f32 = 5.0;
@@ -57,6 +57,8 @@ pub struct ParagraphInput<'a> {
     pub text: &'a str,
     pub base: &'a TextStyle,
     pub spans: &'a [StyleSpan],
+    /// Alignment, line spacing and the space around the paragraph.
+    pub style: ParagraphStyle,
 }
 
 /// A table as input to pagination: rows of cells, each cell a list of paragraphs. Columns
@@ -137,6 +139,8 @@ pub struct Paginator {
     geometry: PageGeometry,
     cache: HashMap<u64, ParagraphLayout>,
     keys: Vec<u64>,
+    /// Each paragraph's style from the last call, for spacing while stacking.
+    styles: Vec<ParagraphStyle>,
     plan: Vec<Plan>,
     pages: Vec<Page>,
     /// Every line in document order with its page position; navigation walks this.
@@ -152,6 +156,7 @@ impl Paginator {
             geometry,
             cache: HashMap::new(),
             keys: Vec::new(),
+            styles: Vec::new(),
             plan: Vec::new(),
             pages: Vec::new(),
             lines: Vec::new(),
@@ -215,10 +220,12 @@ impl Paginator {
 
         let mut fresh = HashMap::with_capacity(inputs.len());
         self.keys.clear();
+        self.styles.clear();
         self.last_shaped = 0;
         for (p, width) in &inputs {
             let key = cache_key(p, *width);
             self.keys.push(key);
+            self.styles.push(p.style);
             if fresh.contains_key(&key) {
                 continue;
             }
@@ -226,7 +233,7 @@ impl Paginator {
                 Some(l) => l,
                 None => {
                     self.last_shaped += 1;
-                    engine.layout_paragraph(p.text, p.base, p.spans, *width)
+                    engine.layout_paragraph_styled(p.text, p.base, p.spans, &p.style, *width)
                 }
             };
             fresh.insert(key, layout);
@@ -316,13 +323,23 @@ impl Paginator {
         };
         let left = s.g.margin_left;
         let width = s.g.content_width();
+        let style = self.style(index);
         let mut start = 0;
         for (i, line) in para.lines.iter().enumerate() {
             let h = line.bottom - line.top;
-            if s.needs_break(h) {
+            // Space before is dropped at the top of a page, so pages start flush with the
+            // margin, as in Google Docs.
+            let before = if i == 0 && s.y > s.g.margin_top {
+                style.space_before
+            } else {
+                0.0
+            };
+            if s.needs_break(before + h) {
                 s.push_fragment(index, start..i, para, left);
                 s.new_page();
                 start = i;
+            } else {
+                s.y += before;
             }
             s.out.lines.push(PlacedLine {
                 page: s.page(),
@@ -342,6 +359,12 @@ impl Paginator {
             s.y += h;
         }
         s.push_fragment(index, start..para.lines.len(), para, left);
+        // Space after may run past the bottom margin; the next block then starts a new page.
+        s.y += style.space_after;
+    }
+
+    fn style(&self, index: usize) -> ParagraphStyle {
+        self.styles.get(index).copied().unwrap_or_default()
     }
 
     /// Places a table row by row.
@@ -361,21 +384,7 @@ impl Paginator {
         let limit = s.g.margin_top + s.g.content_height();
 
         for row in rows {
-            // Each cell's lines in reading order: (paragraph, line, height).
-            let cells: Vec<Vec<(usize, usize, f32)>> = row
-                .iter()
-                .map(|cell| {
-                    cell.clone()
-                        .filter_map(|i| self.paragraph(i).map(|p| (i, p)))
-                        .flat_map(|(i, p)| {
-                            p.lines
-                                .iter()
-                                .enumerate()
-                                .map(move |(n, l)| (i, n, l.bottom - l.top))
-                        })
-                        .collect()
-                })
-                .collect();
+            let cells: Vec<Vec<CellLine>> = row.iter().map(|cell| self.cell_lines(cell)).collect();
             let mut next = vec![0usize; cells.len()];
 
             while cells.iter().zip(&next).any(|(c, &n)| n < c.len()) {
@@ -403,7 +412,7 @@ impl Paginator {
                     .iter()
                     .zip(&next)
                     .zip(&take)
-                    .map(|((c, &n), &k)| c[n..n + k].iter().map(|l| l.2).sum::<f32>())
+                    .map(|((c, &n), &k)| c[n..n + k].iter().map(CellLine::extent).sum::<f32>())
                     .fold(0.0, f32::max);
                 let continues = cells
                     .iter()
@@ -430,35 +439,39 @@ impl Paginator {
                     };
                     let mut y = top + CELL_PADDING;
                     let placed = &c[*n..*n + k];
-                    for &(index, line, h) in placed {
-                        if line == 0 {
-                            s.out.first_line[index] = s.out.lines.len();
+                    // One fragment per paragraph piece on this page: (paragraph, first line,
+                    // top, line count).
+                    let mut pieces: Vec<(usize, usize, f32, usize)> = Vec::new();
+                    for l in placed {
+                        y += l.before;
+                        if l.line == 0 {
+                            s.out.first_line[l.paragraph] = s.out.lines.len();
                         }
                         s.out.lines.push(PlacedLine {
                             page,
-                            paragraph: index,
-                            line,
+                            paragraph: l.paragraph,
+                            line: l.line,
                             top: y,
-                            bottom: y + h,
+                            bottom: y + l.height,
                             left,
                             width: text_width,
                             region,
                         });
-                        y += h;
+                        match pieces.last_mut() {
+                            Some(p) if p.0 == l.paragraph => p.3 += 1,
+                            _ => pieces.push((l.paragraph, l.line, y, 1)),
+                        }
+                        y += l.height + l.after;
                     }
-                    // One fragment per paragraph piece on this page.
-                    let mut fy = top + CELL_PADDING;
-                    for piece in placed.chunk_by(|a, b| a.0 == b.0) {
-                        let (index, first, _) = piece[0];
-                        if let Some(p) = s.out.pages.last_mut() {
+                    if let Some(p) = s.out.pages.last_mut() {
+                        for (paragraph, first, top, count) in pieces {
                             p.fragments.push(Fragment {
-                                paragraph: index,
-                                lines: first..first + piece.len(),
-                                top: fy,
+                                paragraph,
+                                lines: first..first + count,
+                                top,
                                 left,
                             });
                         }
-                        fy += piece.iter().map(|l| l.2).sum::<f32>();
                     }
                     *n += k;
                 }
@@ -473,14 +486,57 @@ impl Paginator {
     }
 }
 
-/// How many of `lines` (heights in the last field) fit, in order, within `room`.
-fn lines_that_fit(lines: &[(usize, usize, f32)], room: f32) -> usize {
+/// One line of a table cell, with the paragraph spacing around it.
+struct CellLine {
+    paragraph: usize,
+    line: usize,
+    height: f32,
+    /// Space above: the paragraph's space before, on its first line only.
+    before: f32,
+    /// Space below: the paragraph's space after, on its last line only.
+    after: f32,
+}
+
+impl CellLine {
+    fn extent(&self) -> f32 {
+        self.before + self.height + self.after
+    }
+}
+
+impl Paginator {
+    /// A cell's lines in reading order; `cell` is its range of paragraph indices.
+    fn cell_lines(&self, cell: &Range<usize>) -> Vec<CellLine> {
+        let mut out = Vec::new();
+        for i in cell.clone() {
+            let Some(p) = self.paragraph(i) else {
+                continue;
+            };
+            let style = self.style(i);
+            let last = p.lines.len().saturating_sub(1);
+            for (n, l) in p.lines.iter().enumerate() {
+                out.push(CellLine {
+                    paragraph: i,
+                    line: n,
+                    height: l.bottom - l.top,
+                    before: if n == 0 { style.space_before } else { 0.0 },
+                    after: if n == last { style.space_after } else { 0.0 },
+                });
+            }
+        }
+        out
+    }
+}
+
+/// How many of `lines` fit, in order, within `room`. Space after a line doesn't need to fit.
+fn lines_that_fit(lines: &[CellLine], room: f32) -> usize {
     let mut used = 0.0;
     lines
         .iter()
         .take_while(|l| {
-            used += l.2;
-            used <= room + 0.001
+            used += l.before + l.height;
+            let fits = used <= room + 0.001;
+            used += l.after;
+            fits
         })
         .count()
 }
@@ -589,6 +645,9 @@ fn cache_key(p: &ParagraphInput, width: f32) -> u64 {
         s.byte_range.hash(&mut h);
         hash_style(&s.style, &mut h);
     }
+    // Space before/after is applied while stacking and doesn't change the paragraph's shape.
+    p.style.align.hash(&mut h);
+    p.style.line_spacing.to_bits().hash(&mut h);
     width.to_bits().hash(&mut h);
     h.finish()
 }
@@ -597,4 +656,5 @@ fn hash_style(s: &TextStyle, h: &mut impl Hasher) {
     s.font_family.hash(h);
     s.font_size.to_bits().hash(h);
     s.font_weight.to_bits().hash(h);
+    s.italic.hash(h);
 }

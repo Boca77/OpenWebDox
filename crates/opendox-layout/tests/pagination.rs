@@ -1,7 +1,8 @@
 //! Golden tests for pagination, using only bundled fonts.
 
 use opendox_layout::{
-    FontLibrary, LayoutEngine, Page, PageGeometry, Paginator, ParagraphInput, TextStyle,
+    FontLibrary, LayoutEngine, Page, PageGeometry, Paginator, ParagraphInput, ParagraphStyle,
+    TextStyle,
 };
 
 const REGULAR: &[u8] = include_bytes!("../../../fonts/noto/NotoSans-Regular.ttf");
@@ -17,6 +18,7 @@ fn style(size: f32) -> TextStyle {
         font_family: "Noto Sans".into(),
         font_size: size,
         font_weight: 400.0,
+        italic: false,
     }
 }
 
@@ -27,6 +29,7 @@ fn inputs<'a>(texts: &'a [String], base: &'a TextStyle) -> Vec<ParagraphInput<'a
             text: t,
             base,
             spans: &[],
+            style: ParagraphStyle::default(),
         })
         .collect()
 }
@@ -121,16 +124,19 @@ fn line_taller_than_page_gets_its_own_page() {
             text: &texts[0],
             base: &base,
             spans: &[],
+            style: ParagraphStyle::default(),
         },
         ParagraphInput {
             text: &texts[1],
             base: &huge,
             spans: &[],
+            style: ParagraphStyle::default(),
         },
         ParagraphInput {
             text: &texts[2],
             base: &base,
             spans: &[],
+            style: ParagraphStyle::default(),
         },
     ];
     let mut p = Paginator::new(PageGeometry::letter());

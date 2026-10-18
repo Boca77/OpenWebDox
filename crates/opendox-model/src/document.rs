@@ -8,6 +8,7 @@ use loro::{
 };
 
 use crate::error::ModelError;
+use crate::format::{mark_paragraph, CharFormat, CHAR_KEYS, PARAGRAPH_KEYS};
 use crate::grapheme;
 use crate::outline::{Outline, TableInput, TextRef};
 use crate::table::{cell_container, CellRef, TableHandle, TABLES, TABLE_MARK, TABLE_PLACEHOLDER};
@@ -26,7 +27,7 @@ const BODY: &str = "body";
 /// Editors should work through an [`Outline`] and the `*_at` methods, which take flat positions
 /// covering body and table cells alike.
 pub struct Document {
-    doc: LoroDoc,
+    pub(crate) doc: LoroDoc,
     /// Makes ids created within one transaction unique.
     id_seq: Cell<u64>,
 }
@@ -42,7 +43,7 @@ pub struct Paragraph {
 /// A position that follows the text it was created next to, so it stays correct when other
 /// replicas insert or delete before it. Used for carets, selections and remote cursors.
 #[derive(Debug, Clone)]
-pub struct Anchor(Cursor);
+pub struct Anchor(pub(crate) Cursor);
 
 /// The set of edits a replica has seen. Pass it to [`Document::export_updates_since`] to get
 /// only what that replica is missing.
@@ -115,14 +116,25 @@ impl Document {
 
     fn from_loro(doc: LoroDoc) -> Self {
         // Mark behaviour is local configuration, not synced: every replica must set it.
-        // A table mark must never spread to text typed next to the placeholder.
+        // A table mark must never spread to text typed next to the placeholder, nor a
+        // paragraph format to the text before its line break. Character formats continue
+        // into text typed at their end.
         let mut styles = StyleConfigMap::new();
-        styles.insert(
-            TABLE_MARK.into(),
-            StyleConfig {
-                expand: ExpandType::None,
-            },
-        );
+        let never = StyleConfig {
+            expand: ExpandType::None,
+        };
+        styles.insert(TABLE_MARK.into(), never);
+        for key in PARAGRAPH_KEYS {
+            styles.insert(key.into(), never);
+        }
+        for key in CHAR_KEYS {
+            styles.insert(
+                key.into(),
+                StyleConfig {
+                    expand: ExpandType::After,
+                },
+            );
+        }
         doc.config_text_style(styles);
         Self {
             doc,
@@ -139,7 +151,7 @@ impl Document {
         format!("{prefix}{peer:x}.{ops}.{seq}")
     }
 
-    fn body(&self) -> LoroText {
+    pub(crate) fn body(&self) -> LoroText {
         self.doc.get_text(BODY)
     }
 
@@ -173,11 +185,48 @@ impl Document {
     }
 
     /// Inserts `s` into a container at char index `pos` (a grapheme boundary).
+    ///
+    /// Line breaks in `s` split the paragraph; every piece keeps its paragraph format. Text
+    /// typed at the start of a paragraph takes the format of the text after it.
     pub fn insert_in(&self, container: &TextRef, pos: usize, s: &str) -> Result<(), ModelError> {
-        let text = self.container(container)?;
-        check_boundary(&text.to_string(), pos)?;
-        text.insert(pos, s).map_err(crdt)?;
+        self.raw_insert(container, pos, s, None)?;
         self.doc.commit();
+        Ok(())
+    }
+
+    /// Inserts without committing. With `format`, the new text gets exactly that format
+    /// instead of the one it would pick up from its neighbours.
+    fn raw_insert(
+        &self,
+        container: &TextRef,
+        pos: usize,
+        s: &str,
+        format: Option<&CharFormat>,
+    ) -> Result<(), ModelError> {
+        let text = self.container(container)?;
+        let before = text.to_string();
+        check_boundary(&before, pos)?;
+        let split = s
+            .contains('\n')
+            .then(|| self.paragraph_format_in(container, pos));
+        let prev = pos.checked_sub(1).and_then(|p| before.chars().nth(p));
+        let next = before.chars().nth(pos);
+        let lead = (prev.is_none_or(|c| c == '\n')
+            && next.is_some_and(|c| c != '\n' && c != TABLE_PLACEHOLDER))
+        .then(|| self.char_format_in(&text, pos));
+
+        text.insert(pos, s).map_err(crdt)?;
+        let n = s.chars().count();
+        if let Some(f) = format.cloned().or(lead) {
+            self.set_char_format(&text, pos..pos + n, &f)?;
+        }
+        if let Some(f) = split {
+            for (i, c) in s.chars().enumerate() {
+                if c == '\n' {
+                    mark_paragraph(&text, pos + i, f)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -197,8 +246,20 @@ impl Document {
         let s = text.to_string();
         check_boundary(&s, range.start)?;
         check_boundary(&s, range.end)?;
+        // Joining paragraphs keeps the first one's format, as in Google Docs. Its line break,
+        // which held the format, is among the deleted characters.
+        let joins = s
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .any(|c| c == '\n');
+        let first = joins.then(|| self.paragraph_format_in(container, range.start));
         text.delete(range.start, range.end - range.start)
-            .map_err(crdt)
+            .map_err(crdt)?;
+        if let Some(f) = first {
+            self.write_paragraph_format(container, range.start, f)?;
+        }
+        Ok(())
     }
 
     /// Splits the text into paragraphs on `\n`. An empty document has one empty paragraph, and
@@ -325,8 +386,12 @@ impl Document {
         check_boundary(&body.to_string(), pos)?;
         let at_paragraph_start = pos == 0 || text.get(pos - 1) == Some(&'\n');
         let lead = if at_paragraph_start { "" } else { "\n" };
+        let split = self.paragraph_format_in(&TextRef::Body, pos);
         body.insert(pos, &format!("{lead}{TABLE_PLACEHOLDER}\n"))
             .map_err(crdt)?;
+        if !lead.is_empty() {
+            mark_paragraph(&body, pos, split)?;
+        }
         let placeholder = pos + lead.len();
         let id = self.new_id("t");
         body.mark(placeholder..placeholder + 1, TABLE_MARK, id.as_str())
@@ -388,6 +453,7 @@ impl Document {
         columns.delete(at, 1).map_err(crdt)?;
         for row in t.rows() {
             row.delete(&id).map_err(crdt)?;
+            Document::delete_cell_tail(&row, &id)?;
         }
         self.doc.commit();
         Ok(())
@@ -421,6 +487,25 @@ impl Document {
         }
         let loc = outline.locate(pos);
         self.insert_in(&loc.container, loc.offset, &clean)?;
+        Ok(pos + clean.chars().count())
+    }
+
+    /// [`Document::insert_at`] giving the new text exactly `format`, as one change. For typing
+    /// after toggling a format with nothing selected.
+    pub fn insert_formatted_at(
+        &self,
+        outline: &Outline,
+        pos: usize,
+        s: &str,
+        format: &CharFormat,
+    ) -> Result<usize, ModelError> {
+        let clean: String = s.chars().filter(|&c| c != TABLE_PLACEHOLDER).collect();
+        if clean.is_empty() {
+            return Ok(pos);
+        }
+        let loc = outline.locate(pos);
+        self.raw_insert(&loc.container, loc.offset, &clean, Some(format))?;
+        self.doc.commit();
         Ok(pos + clean.chars().count())
     }
 
@@ -559,7 +644,7 @@ impl Document {
         self.doc.get_map(TABLES)
     }
 
-    fn table(&self, id: &str) -> Option<TableHandle> {
+    pub(crate) fn table(&self, id: &str) -> Option<TableHandle> {
         match self.tables_map().get(id)? {
             ValueOrContainer::Container(Container::Map(map)) => Some(TableHandle { map }),
             _ => None,
@@ -591,7 +676,7 @@ impl Document {
         out
     }
 
-    fn container(&self, r: &TextRef) -> Result<LoroText, ModelError> {
+    pub(crate) fn container(&self, r: &TextRef) -> Result<LoroText, ModelError> {
         match r {
             TextRef::Body => Ok(self.body()),
             TextRef::Cell(c) => self.cell(c),
@@ -599,7 +684,7 @@ impl Document {
     }
 
     /// A cell's text container if it exists, without creating it.
-    fn existing_cell(&self, c: &CellRef) -> Option<LoroText> {
+    pub(crate) fn existing_cell(&self, c: &CellRef) -> Option<LoroText> {
         let t = self.table(&c.table)?;
         let col = t.columns().get(c.col).cloned()?;
         let row = t.rows().get(c.row).cloned()?;

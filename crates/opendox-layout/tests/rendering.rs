@@ -1,7 +1,8 @@
 //! Data the renderer consumes: glyph outlines and glyphs placed on pages.
 
 use opendox_layout::{
-    FontId, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, TextStyle,
+    FontId, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, ParagraphStyle,
+    TextStyle,
 };
 
 const REGULAR: &[u8] = include_bytes!("../../../fonts/noto/NotoSans-Regular.ttf");
@@ -13,6 +14,7 @@ fn setup() -> (LayoutEngine, FontId, TextStyle) {
         font_family: "Noto Sans".into(),
         font_size: 12.0,
         font_weight: 400.0,
+        italic: false,
     };
     (LayoutEngine::new(fonts), id, style)
 }
@@ -59,6 +61,7 @@ fn placed_glyphs_sit_inside_the_page_margins() {
             text: t,
             base: &style,
             spans: &[],
+            style: ParagraphStyle::default(),
         })
         .collect();
     let g = PageGeometry::letter();

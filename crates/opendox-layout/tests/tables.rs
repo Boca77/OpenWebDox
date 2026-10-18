@@ -1,8 +1,8 @@
 //! Table layout: cell geometry, borders, pagination by row, hit testing and arrow keys.
 
 use opendox_layout::{
-    BlockInput, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, TableInput,
-    TextPosition, TextStyle, CELL_PADDING,
+    BlockInput, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, ParagraphStyle,
+    TableInput, TextPosition, TextStyle, CELL_PADDING,
 };
 
 const REGULAR: &[u8] = include_bytes!("../../../fonts/noto/NotoSans-Regular.ttf");
@@ -22,6 +22,7 @@ fn style() -> TextStyle {
         font_family: "Noto Sans".into(),
         font_size: 12.0,
         font_weight: 400.0,
+        italic: false,
     }
 }
 
@@ -30,6 +31,7 @@ fn para<'a>(text: &'a str, s: &'a TextStyle) -> ParagraphInput<'a> {
         text,
         base: s,
         spans: &[],
+        style: ParagraphStyle::default(),
     }
 }
 

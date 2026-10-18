@@ -19,8 +19,15 @@ const PEOPLE = [
 const FONTS = [
   "../fonts/noto/NotoSans-Regular.ttf",
   "../fonts/noto/NotoSans-Bold.ttf",
+  "../fonts/noto/NotoSans-Italic.ttf",
+  "../fonts/noto/NotoSans-BoldItalic.ttf",
+  "../fonts/noto/NotoSerif-Regular.ttf",
+  "../fonts/noto/NotoSerif-Bold.ttf",
+  "../fonts/noto/NotoSerif-Italic.ttf",
+  "../fonts/noto/NotoSerif-BoldItalic.ttf",
   "../fonts/noto/NotoSansArabic-Regular.ttf",
 ];
+const DEFAULT_SIZE = 11;
 
 // Opening of "Alice's Adventures in Wonderland" (Lewis Carroll, 1865; public domain).
 const ALICE = [
@@ -49,11 +56,13 @@ async function main() {
     const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
     editor.register_font(bytes);
   }
-  editor.set_default_font("Noto Sans, Noto Sans Arabic", 11);
+  editor.set_default_font("Noto Sans, Noto Sans Arabic", DEFAULT_SIZE);
 
   // A shared document starts from whatever the server has, so no sample text is seeded
   // (two tabs seeding at once would each add a copy).
   if (!DOC_ID) seedSample(editor);
+  // Building the sample isn't something to undo.
+  editor.clear_history();
 
   const view = new EditorView(editor, $("pages"));
   view.onUpdate = ({ layoutMs, render }) => {
@@ -61,9 +70,11 @@ async function main() {
     $("s-layout").textContent = `${layoutMs.toFixed(1)} ms`;
     $("s-render").textContent = `${render.ms.toFixed(1)} ms`;
   };
+  const refreshToolbar = setUpFormatBar(view);
   view.onSelectionChange = () => {
     const t = view.tableInfo();
     $("s-cell").textContent = t ? `row ${t.row + 1}, col ${t.col + 1} of ${t.rows} × ${t.cols}` : "–";
+    refreshToolbar();
   };
   view.relayout();
   view.focusEditor();
@@ -122,6 +133,49 @@ function personItem(name, color) {
   swatch.style.background = color;
   li.append(swatch, name);
   return li;
+}
+
+/** Undo/redo, font, size, bold, italic, alignment and spacing. Returns a refresh function. */
+function setUpFormatBar(view) {
+  const bar = $("format-bar");
+  // Clicking a toolbar button shouldn't take focus from the text (and hide the caret).
+  bar.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) e.preventDefault();
+  });
+  const run = (fn) => () => {
+    fn();
+    view.focusEditor();
+  };
+  $("undo").addEventListener("click", run(() => view.undo()));
+  $("redo").addEventListener("click", run(() => view.redo()));
+  $("bold").addEventListener("click", run(() => view.toggleBold()));
+  $("italic").addEventListener("click", run(() => view.toggleItalic()));
+  for (const b of bar.querySelectorAll("[data-align]")) {
+    b.addEventListener("click", run(() => view.setAlign(b.dataset.align)));
+  }
+  const onChange = (id, fn) => $(id).addEventListener("change", (e) => run(() => fn(e.target.value))());
+  onChange("font", (v) => view.setFont(v || null));
+  onChange("font-size", (v) => view.setFontSize(Number(v) === DEFAULT_SIZE ? null : Number(v)));
+  onChange("line-spacing", (v) => view.setLineSpacing(Number(v)));
+  const spacing = () => view.setParagraphSpacing(Number($("space-before").value), Number($("space-after").value));
+  onChange("space-before", spacing);
+  onChange("space-after", spacing);
+
+  return () => {
+    const s = view.formatState();
+    $("undo").disabled = !s.canUndo;
+    $("redo").disabled = !s.canRedo;
+    $("bold").setAttribute("aria-pressed", String(s.bold));
+    $("italic").setAttribute("aria-pressed", String(s.italic));
+    for (const b of bar.querySelectorAll("[data-align]")) {
+      b.setAttribute("aria-pressed", String(b.dataset.align === s.align));
+    }
+    $("font").value = s.font ?? "";
+    $("font-size").value = String(s.size ?? DEFAULT_SIZE);
+    $("line-spacing").value = String(s.lineSpacing);
+    $("space-before").value = String(s.spaceBefore);
+    $("space-after").value = String(s.spaceAfter);
+  };
 }
 
 /** Insert ▸ Table: hover or arrow through a 10 × 10 grid, click or Enter to insert. */

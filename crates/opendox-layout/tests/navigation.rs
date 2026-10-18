@@ -1,7 +1,8 @@
 //! Hit testing, carets, vertical movement and selection rectangles.
 
 use opendox_layout::{
-    FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, TextPosition, TextStyle,
+    FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput, ParagraphStyle,
+    TextPosition, TextStyle,
 };
 
 const REGULAR: &[u8] = include_bytes!("../../../fonts/noto/NotoSans-Regular.ttf");
@@ -19,6 +20,7 @@ fn paginate(texts: &[&str]) -> Paginator {
         font_family: "Noto Sans, Noto Sans Arabic".into(),
         font_size: 12.0,
         font_weight: 400.0,
+        italic: false,
     };
     let inputs: Vec<ParagraphInput> = texts
         .iter()
@@ -26,6 +28,7 @@ fn paginate(texts: &[&str]) -> Paginator {
             text: t,
             base: &style,
             spans: &[],
+            style: ParagraphStyle::default(),
         })
         .collect();
     let mut p = Paginator::new(PageGeometry::letter());

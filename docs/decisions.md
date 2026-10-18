@@ -90,5 +90,26 @@ Clients talk to one server per document over a WebSocket (`/doc/{id}`), not peer
 Rejected: Loro's own awareness/ephemeral store (would expose Loro types past `opendox-model`);
 sending every keystroke as its own message.
 
+## D11 — Formatting as marks; paragraph formats on the line break; Loro undo (2026-10-19)
+- Character formats (`bold`, `italic`, `size`, `font`) are Loro rich-text marks that expand
+  after, so typing at the end of bold text stays bold. Text typed at the start of a paragraph
+  copies the format of the character after it, as in Google Docs.
+- Paragraph formats (alignment, line spacing, space before/after) are marks that never expand,
+  on the character ending the paragraph: its `\n` (or a table placeholder). The last paragraph
+  of a container has none, so its format sits beside the container (`body_tail` map, or
+  `<column id>|p_*` keys in a table row). Inserting line breaks copies the paragraph's format to
+  each new break; deleting breaks keeps the first paragraph's format.
+  Rejected: marks over the paragraph's text (an empty paragraph has nothing to mark), and a
+  separate list of paragraph records (would need re-linking after every concurrent split).
+- Line spacing is a multiple of the fonts' natural line height (parley `MetricsRelative`), as in
+  Google Docs. Space before is dropped at the top of a page.
+- Undo/redo uses Loro's `UndoManager`, which undoes only this replica's edits and still works
+  after others edited around them. Each step stores the selection from before it (Loro cursors)
+  and undo restores it. The editor decides which edits may merge into one step (continued
+  typing within 1 s) and forces a new step otherwise; `record_new_checkpoint` alone doesn't.
+- Bundled Noto Sans Italic/Bold Italic and Noto Serif Regular/Bold/Italic/Bold Italic (same
+  source and licence as the existing Noto files) so italics are real faces and there's a second
+  family. Adds about 4.3 MB to the repo.
+
 ## Open
 - Colour emoji rendering.

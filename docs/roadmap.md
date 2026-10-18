@@ -66,8 +66,18 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
   updates and when the last client leaves), wasm sync calls, `Collaboration` in the editor
   package (batched sends every 30 ms, reconnect with backoff, remote carets with name flags).
 
-## M7 — Rich text and undo
+## M7 — Rich text and undo ✅
+`npm run e2e` covers Ctrl+B/I, the font menu, Ctrl+Shift+E, undo/redo keys and the Undo
+button; `npm run e2e:collab` checks formatting reaches the other tab.
 - Bold/italic/size/font marks, paragraph attributes (alignment, spacing), local-only undo/redo.
+- Built (D11): character formats as Loro marks; paragraph formats (alignment, line spacing,
+  space before/after) on each paragraph's line break; Enter keeps the format on both halves,
+  joining keeps the first paragraph's. Layout: italic faces, alignment incl. justify (carets
+  match the stretched spaces), line spacing, spacing in body and cells. Undo on Loro's
+  `UndoManager`: only this user's edits, restores the selection, a burst of typing is one
+  step. Bundled Noto Sans Italic/Bold Italic and Noto Serif (4 faces). Demo toolbar.
+- Property test: 3 replicas, concurrent text edits, character and paragraph formatting,
+  delivered in random order, converge to identical text and formats.
 
 ## Known debt
 - `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
@@ -76,8 +86,19 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
 - Renderer draws every page on every render; should draw only pages in view.
 - No emoji or CJK font bundled: those characters render as empty boxes (layout is correct).
 - Pagination restacks every line on every call.
-- Editing gaps: no undo (M7), no Ctrl+Arrow word movement, no double/triple-click selection, no
-  rich clipboard (plain text only).
+- Editing gaps: no Ctrl+Arrow word movement, no double/triple-click selection, no rich
+  clipboard (plain text only, so pasting drops formatting).
+- Formatting gaps: no underline, strikethrough, colour, highlight, links, styles (Heading 1…),
+  indents or lists. Only two font families (Noto Sans, Noto Serif). A family with no italic
+  face (Noto Sans Arabic) draws upright: we never slant glyphs synthetically.
+- Every layout reads all marks of every container (`to_delta`), O(n) per keystroke like the
+  outline rebuild.
+- Undo steps are split by a heuristic: typing that continues where the last edit ended joins
+  the step if within 1 s; anything else starts a new one. Google Docs also splits at words.
+- A format chosen at a caret (Ctrl+B, then type) is remembered by position only; moving away
+  and back to the same spot before typing still applies it.
+- Two people giving the same last paragraph of a cell a format at the same time: last writer
+  wins per property (plain map values), same as for marks.
 - Arrow keys move in logical order; in right-to-left text Left/Right feel reversed. Visual
   movement for bidi text is still to do.
 - Every keystroke redraws every page (about 1.5 ms per page); should redraw only changed,

@@ -6,9 +6,12 @@
 
 use opendox_layout::{
     BlockInput, FontId, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput,
-    TableInput, TextPosition, TextStyle,
+    ParagraphStyle, StyleSpan, TableInput, TextPosition, TextStyle,
 };
-use opendox_model::{Anchor, Block, Document, Outline};
+use opendox_model::{
+    Align, Anchor, Block, CharFormat, Document, FormatChange, FormatRun, History, Outline,
+    ParagraphChange, ParagraphFormat,
+};
 use opendox_sync::{Presence, SyncClient};
 use wasm_bindgen::prelude::*;
 
@@ -32,6 +35,13 @@ pub struct Editor {
     sync: SyncClient,
     /// A message produced while handling a server message, waiting for [`Editor::sync_flush`].
     sync_reply: Option<Vec<u8>>,
+    history: History,
+    /// Where the last typing-like edit left the caret; typing on from there joins its undo
+    /// step.
+    last_edit_end: Option<usize>,
+    /// A format chosen with nothing selected (Ctrl+B at a caret), applied to the next text
+    /// typed at that position.
+    pending: Option<(usize, CharFormat)>,
 }
 
 /// Bit set in [`Editor::sync_receive`]'s flags when the document changed.
@@ -52,6 +62,7 @@ impl Editor {
     pub fn new() -> Editor {
         let doc = Document::new();
         let outline = doc.outline();
+        let history = History::new(&doc);
         Editor {
             doc,
             engine: LayoutEngine::new(FontLibrary::new()),
@@ -60,10 +71,14 @@ impl Editor {
                 font_family: "Noto Sans".into(),
                 font_size: 12.0,
                 font_weight: 400.0,
+                italic: false,
             },
             outline,
             sync: SyncClient::new(),
             sync_reply: None,
+            history,
+            last_edit_end: None,
+            pending: None,
         }
     }
 
@@ -102,23 +117,157 @@ impl Editor {
 
     /// Inserts `text` at `pos` and returns the caret position just after it.
     pub fn insert(&mut self, pos: usize, text: &str) -> Result<usize, JsError> {
-        Ok(self.doc.insert_at(&self.outline, pos, text)?)
+        self.begin(pos, pos, true);
+        let after = match self.pending.take().filter(|(p, _)| *p == pos) {
+            Some((_, f)) => self.doc.insert_formatted_at(&self.outline, pos, text, &f)?,
+            None => self.doc.insert_at(&self.outline, pos, text)?,
+        };
+        self.last_edit_end = Some(after);
+        Ok(after)
     }
 
     /// Deletes between two positions; returns where the caret goes. Spanning body text and a
     /// table deletes the whole table; spanning cells of one table clears them.
     pub fn delete(&mut self, start: usize, end: usize) -> Result<usize, JsError> {
-        Ok(self.doc.delete_range_at(&self.outline, start, end)?)
+        self.begin(start, end, false);
+        let at = self.doc.delete_range_at(&self.outline, start, end)?;
+        // Typing over a selection undoes together with the deletion.
+        self.last_edit_end = Some(at);
+        Ok(at)
     }
 
     /// Backspace: returns the new caret position.
     pub fn delete_backward(&mut self, pos: usize) -> Result<usize, JsError> {
-        Ok(self.doc.delete_backward_at(&self.outline, pos)?)
+        self.begin(pos, pos, true);
+        let at = self.doc.delete_backward_at(&self.outline, pos)?;
+        self.last_edit_end = Some(at);
+        Ok(at)
     }
 
     /// Delete key: returns the new caret position.
     pub fn delete_forward(&mut self, pos: usize) -> Result<usize, JsError> {
-        Ok(self.doc.delete_forward_at(&self.outline, pos)?)
+        self.begin(pos, pos, true);
+        let at = self.doc.delete_forward_at(&self.outline, pos)?;
+        self.last_edit_end = Some(at);
+        Ok(at)
+    }
+
+    // --- formatting ----------------------------------------------------------------------
+
+    /// Bold on or off for the selection. With nothing selected it applies to the next text
+    /// typed at the caret, as in Google Docs.
+    pub fn set_bold(&mut self, anchor: usize, focus: usize, on: bool) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Bold(on))
+    }
+
+    pub fn set_italic(&mut self, anchor: usize, focus: usize, on: bool) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Italic(on))
+    }
+
+    /// Font size in points; 0 returns to the default size.
+    pub fn set_font_size(&mut self, anchor: usize, focus: usize, size: f32) -> Result<(), JsError> {
+        self.format(
+            anchor,
+            focus,
+            FormatChange::Size((size > 0.0).then_some(size)),
+        )
+    }
+
+    /// Font family name (a registered family); empty returns to the default font.
+    pub fn set_font(&mut self, anchor: usize, focus: usize, family: &str) -> Result<(), JsError> {
+        let f = (!family.is_empty()).then(|| family.to_owned());
+        self.format(anchor, focus, FormatChange::Font(f))
+    }
+
+    /// `[bold, italic, size]` at the caret or across the selection (bold/italic only if all
+    /// of it is). Size 0 means the default. Includes a pending format at the caret.
+    pub fn char_format(&self, anchor: usize, focus: usize) -> Vec<f32> {
+        let f = self.effective_format(anchor, focus);
+        vec![
+            f32::from(u8::from(f.bold)),
+            f32::from(u8::from(f.italic)),
+            f.size.unwrap_or(0.0),
+        ]
+    }
+
+    /// Font family at the caret or the start of the selection; empty for the default.
+    pub fn char_font(&self, anchor: usize, focus: usize) -> String {
+        self.effective_format(anchor, focus)
+            .font
+            .unwrap_or_default()
+    }
+
+    /// Alignment of the paragraphs touched by the selection: 0 left, 1 centre, 2 right,
+    /// 3 justify.
+    pub fn set_align(&mut self, anchor: usize, focus: usize, align: u32) -> Result<(), JsError> {
+        let a = match align {
+            1 => Align::Center,
+            2 => Align::Right,
+            3 => Align::Justify,
+            _ => Align::Left,
+        };
+        self.paragraph(anchor, focus, ParagraphChange::Align(a))
+    }
+
+    /// Line spacing as a multiple of single spacing (1, 1.15, 1.5, 2 …).
+    pub fn set_line_spacing(&mut self, anchor: usize, focus: usize, v: f32) -> Result<(), JsError> {
+        self.paragraph(anchor, focus, ParagraphChange::LineSpacing(v.max(0.5)))
+    }
+
+    /// Space before the paragraphs, in points.
+    pub fn set_space_before(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        pt: f32,
+    ) -> Result<(), JsError> {
+        self.paragraph(anchor, focus, ParagraphChange::SpaceBefore(pt.max(0.0)))
+    }
+
+    /// Space after the paragraphs, in points.
+    pub fn set_space_after(&mut self, anchor: usize, focus: usize, pt: f32) -> Result<(), JsError> {
+        self.paragraph(anchor, focus, ParagraphChange::SpaceAfter(pt.max(0.0)))
+    }
+
+    /// `[align, line spacing, space before, space after]` of the paragraph at `pos`; align as
+    /// in [`Editor::set_align`].
+    pub fn paragraph_format(&self, pos: usize) -> Vec<f32> {
+        let f = self.doc.paragraph_format_at(&self.outline, pos);
+        let align = match f.align {
+            Align::Left => 0.0,
+            Align::Center => 1.0,
+            Align::Right => 2.0,
+            Align::Justify => 3.0,
+        };
+        vec![align, f.line_spacing, f.space_before, f.space_after]
+    }
+
+    // --- undo ----------------------------------------------------------------------------
+
+    /// Undoes this user's last change (never other people's). `anchor`/`focus` are the
+    /// current selection. Returns the selection to restore as `[anchor, focus]`, or
+    /// `undefined` if there was nothing to undo. Call [`Editor::layout`] after.
+    pub fn undo(&mut self, anchor: usize, focus: usize) -> Result<Option<Vec<u32>>, JsError> {
+        self.history_step(anchor, focus, true)
+    }
+
+    /// Redoes the last undone change; like [`Editor::undo`].
+    pub fn redo(&mut self, anchor: usize, focus: usize) -> Result<Option<Vec<u32>>, JsError> {
+        self.history_step(anchor, focus, false)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Forgets undo history, e.g. after building the initial document.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.last_edit_end = None;
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
     }
 
     /// One grapheme left, crossing into the previous paragraph or cell.
@@ -136,6 +285,8 @@ impl Editor {
     /// Inserts a table at the caret (after the current table if the caret is in one) and
     /// returns the position of its first cell.
     pub fn insert_table(&mut self, pos: usize, rows: usize, cols: usize) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let body_pos = match self.outline.table_at(pos) {
             Some(t) => t.placeholder + 1,
             None => self.outline.locate(pos).offset,
@@ -169,6 +320,8 @@ impl Editor {
 
     /// Inserts a row above or below the caret's row; returns the caret in the new row.
     pub fn table_insert_row(&mut self, pos: usize, below: bool) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let c = self.cell(pos)?;
         let row = c.row + usize::from(below);
         self.doc.insert_row(&c.table, row)?;
@@ -181,6 +334,8 @@ impl Editor {
 
     /// Inserts a column left or right of the caret's column; returns the caret in it.
     pub fn table_insert_column(&mut self, pos: usize, right: bool) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let c = self.cell(pos)?;
         let col = c.col + usize::from(right);
         self.doc.insert_column(&c.table, col)?;
@@ -193,6 +348,8 @@ impl Editor {
 
     /// Deletes the caret's row (the whole table if it's the only row).
     pub fn table_delete_row(&mut self, pos: usize) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let c = self.cell(pos)?;
         let rows = self.outline.table(&c.table).map_or(0, |t| t.rows());
         if rows <= 1 {
@@ -209,6 +366,8 @@ impl Editor {
 
     /// Deletes the caret's column (the whole table if it's the only column).
     pub fn table_delete_column(&mut self, pos: usize) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let c = self.cell(pos)?;
         let cols = self.outline.table(&c.table).map_or(0, |t| t.columns);
         if cols <= 1 {
@@ -225,6 +384,8 @@ impl Editor {
 
     /// Deletes the table holding the caret; returns the caret where the table was.
     pub fn table_delete(&mut self, pos: usize) -> Result<usize, JsError> {
+        self.begin(pos, pos, false);
+        self.last_edit_end = None;
         let t = self
             .outline
             .table_at(pos)
@@ -354,12 +515,22 @@ impl Editor {
     /// position or geometry query.
     pub fn layout(&mut self) -> usize {
         self.outline = self.doc.outline();
+        let formats = self.doc.formats(&self.outline);
         let o = &self.outline;
         let style = &self.style;
+        let spans: Vec<Vec<StyleSpan>> = o
+            .slots
+            .iter()
+            .zip(&formats)
+            .map(|(slot, f)| style_spans(style, &slot.text, &f.runs))
+            .collect();
         let para = |i: usize| ParagraphInput {
             text: &o.slots[i].text,
             base: style,
-            spans: &[],
+            spans: &spans[i],
+            style: formats
+                .get(i)
+                .map_or_else(ParagraphStyle::default, |f| paragraph_style(&f.paragraph)),
         };
         let blocks: Vec<BlockInput> = o
             .blocks
@@ -499,6 +670,75 @@ impl Editor {
 }
 
 impl Editor {
+    /// Before every local edit: records the selection for undo, and lets the edit join the
+    /// previous undo step only when it's typing that continues where the last edit ended.
+    fn begin(&mut self, anchor: usize, focus: usize, typing: bool) {
+        let merge = typing && anchor == focus && self.last_edit_end == Some(focus);
+        self.history
+            .before_edit(&self.doc, &self.outline, anchor, focus, merge);
+    }
+
+    fn format(&mut self, anchor: usize, focus: usize, change: FormatChange) -> Result<(), JsError> {
+        if anchor == focus {
+            let mut f = self.effective_format(anchor, focus);
+            apply_format(&mut f, change);
+            self.pending = Some((anchor, f));
+            return Ok(());
+        }
+        self.begin(anchor, focus, false);
+        self.pending = None;
+        self.last_edit_end = None;
+        Ok(self.doc.format_at(&self.outline, anchor, focus, &change)?)
+    }
+
+    fn paragraph(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        change: ParagraphChange,
+    ) -> Result<(), JsError> {
+        self.begin(anchor, focus, false);
+        self.last_edit_end = None;
+        Ok(self
+            .doc
+            .set_paragraph_format_at(&self.outline, anchor, focus, change)?)
+    }
+
+    /// The format typing would produce: a pending one at the caret, else the document's.
+    fn effective_format(&self, anchor: usize, focus: usize) -> CharFormat {
+        match &self.pending {
+            Some((p, f)) if anchor == focus && *p == focus => f.clone(),
+            _ => self.doc.char_format_at(&self.outline, anchor, focus),
+        }
+    }
+
+    fn history_step(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        undo: bool,
+    ) -> Result<Option<Vec<u32>>, JsError> {
+        self.pending = None;
+        self.last_edit_end = None;
+        let step = if undo {
+            self.history.undo(&self.doc, &self.outline, anchor, focus)?
+        } else {
+            self.history.redo(&self.doc, &self.outline, anchor, focus)?
+        };
+        let Some(restored) = step else {
+            return Ok(None);
+        };
+        let fresh = self.doc.outline();
+        let at = |a: Option<&Anchor>, fallback: usize| {
+            a.and_then(|a| self.doc.resolve_at(&fresh, a))
+                .unwrap_or_else(|| fresh.snap(fallback.min(fresh.len))) as u32
+        };
+        Ok(Some(match &restored {
+            Some((a, f)) => vec![at(Some(a), anchor), at(Some(f), focus)],
+            None => vec![at(None, anchor), at(None, focus)],
+        }))
+    }
+
     fn cell(&self, pos: usize) -> Result<opendox_model::CellRef, JsError> {
         self.outline
             .cell_at(pos)
@@ -541,6 +781,62 @@ impl Editor {
             None => p,
         };
         (widen(a, b), widen(b, a))
+    }
+}
+
+fn apply_format(f: &mut CharFormat, change: FormatChange) {
+    match change {
+        FormatChange::Bold(b) => f.bold = b,
+        FormatChange::Italic(i) => f.italic = i,
+        FormatChange::Size(s) => f.size = s,
+        FormatChange::Font(n) => f.font = n,
+    }
+}
+
+/// Layout spans for a paragraph's formatted runs: char ranges to byte ranges, formats to
+/// text styles. A chosen font goes first in the family list, with the default list after it
+/// so characters that font lacks (Arabic, say) still fall back.
+fn style_spans(base: &TextStyle, text: &str, runs: &[FormatRun]) -> Vec<StyleSpan> {
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    let bytes: Vec<usize> = text
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain([text.len()])
+        .collect();
+    runs.iter()
+        .filter_map(|r| {
+            let start = *bytes.get(r.range.start)?;
+            let end = *bytes.get(r.range.end)?;
+            let f = &r.format;
+            Some(StyleSpan {
+                byte_range: start..end,
+                style: TextStyle {
+                    font_family: f.font.as_ref().map_or_else(
+                        || base.font_family.clone(),
+                        |name| format!("{name}, {}", base.font_family),
+                    ),
+                    font_size: f.size.unwrap_or(base.font_size),
+                    font_weight: if f.bold { 700.0 } else { base.font_weight },
+                    italic: f.italic,
+                },
+            })
+        })
+        .collect()
+}
+
+fn paragraph_style(f: &ParagraphFormat) -> ParagraphStyle {
+    ParagraphStyle {
+        align: match f.align {
+            Align::Left => opendox_layout::Align::Left,
+            Align::Center => opendox_layout::Align::Center,
+            Align::Right => opendox_layout::Align::Right,
+            Align::Justify => opendox_layout::Align::Justify,
+        },
+        line_spacing: f.line_spacing,
+        space_before: f.space_before,
+        space_after: f.space_after,
     }
 }
 
@@ -766,6 +1062,134 @@ mod tests {
         b.layout();
         assert!(r[1] as usize <= b.len());
         assert_eq!(b.text(), a.text());
+    }
+
+    const BOLD: &[u8] = include_bytes!("../../../fonts/noto/NotoSans-Bold.ttf");
+
+    /// Font ids used by the glyphs on page 0, in order, deduplicated.
+    fn page_fonts(e: &Editor) -> Vec<u32> {
+        let mut v: Vec<u32> = e
+            .page_glyphs(0)
+            .chunks(GLYPH_STRIDE)
+            .map(|g| g[0] as u32)
+            .collect();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn bold_selection_and_pending_bold_reach_the_bold_font() {
+        let mut e = editor_with("plain bold");
+        let bold = e.register_font(BOLD.to_vec());
+        e.set_bold(6, 10, true).unwrap();
+        e.layout();
+        assert_eq!(page_fonts(&e), vec![0, bold]);
+        assert_eq!(e.char_format(6, 10), vec![1.0, 0.0, 0.0]);
+        assert_eq!(e.char_format(0, 10)[0], 0.0, "mixed selection isn't bold");
+
+        // Ctrl+B with nothing selected: nothing changes until text is typed there.
+        let before = e.page_glyphs(0);
+        e.set_bold(5, 5, false).unwrap(); // caret right after "plain": already not bold
+        e.set_bold(0, 0, true).unwrap();
+        assert_eq!(e.char_format(0, 0)[0], 1.0);
+        e.layout();
+        assert_eq!(e.page_glyphs(0), before);
+        e.insert(0, "B").unwrap();
+        e.layout();
+        assert_eq!(page_fonts(&e), vec![bold, 0, bold]);
+        // Moving away drops the pending format.
+        e.set_italic(3, 3, true).unwrap();
+        e.insert(7, "x").unwrap();
+        e.layout();
+        assert_eq!(e.char_format(7, 8), vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn centred_paragraph_moves_its_glyphs_and_caret() {
+        let mut e = editor_with("short\nleft");
+        let left_x = e.caret_rect(0, false).unwrap()[1];
+        e.set_align(0, 0, 1).unwrap();
+        e.layout();
+        assert_eq!(e.paragraph_format(2)[0], 1.0);
+        let x = e.caret_rect(0, false).unwrap()[1];
+        assert!(x > left_x + 200.0, "centred caret at {x}");
+        assert_eq!(
+            e.caret_rect(6, false).unwrap()[1],
+            left_x,
+            "other paragraph unchanged"
+        );
+        // A click on the centred text lands in it.
+        let r = e.caret_rect(3, false).unwrap();
+        assert_eq!(e.hit_test(0, r[1], (r[2] + r[3]) / 2.0).unwrap()[0], 3);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_text_formats_and_caret() {
+        let mut e = editor_with("");
+        let mut pos = 0;
+        for c in ["h", "e", "y"] {
+            pos = e.insert(pos, c).unwrap();
+            e.layout();
+        }
+        e.set_bold(0, 3, true).unwrap();
+        e.layout();
+        // Moving the caret, then typing, starts a new undo step.
+        e.insert(0, ">").unwrap();
+        e.layout();
+
+        assert_eq!(e.undo(1, 1).unwrap(), Some(vec![0, 0]));
+        e.layout();
+        assert_eq!(e.text(), "hey");
+        assert_eq!(
+            e.undo(0, 0).unwrap(),
+            Some(vec![0, 3]),
+            "selection before bolding"
+        );
+        e.layout();
+        assert_eq!(e.char_format(0, 3)[0], 0.0);
+        assert_eq!(
+            e.undo(0, 3).unwrap(),
+            Some(vec![0, 0]),
+            "the whole burst of typing"
+        );
+        e.layout();
+        assert_eq!(e.text(), "");
+        assert_eq!(e.undo(0, 0).unwrap(), None);
+        assert!(e.can_redo());
+
+        e.redo(0, 0).unwrap().unwrap();
+        e.redo(0, 0).unwrap().unwrap();
+        e.layout();
+        assert_eq!(e.text(), "hey");
+        assert_eq!(e.char_format(0, 3)[0], 1.0);
+    }
+
+    #[test]
+    fn undo_leaves_a_collaborators_edit_alone() {
+        let server = Document::new();
+        let mut a = editor_with("");
+        let mut b = editor_with("");
+        join(&mut a, &server);
+        join(&mut b, &server);
+        a.insert(0, "mine").unwrap();
+        a.layout();
+        let fwd = fake_server(&server, &a.sync_flush().unwrap().unwrap()).unwrap();
+        b.sync_receive(&fwd, 0, 0).unwrap();
+        b.layout();
+        b.insert(4, " theirs").unwrap();
+        b.layout();
+        let fwd = fake_server(&server, &b.sync_flush().unwrap().unwrap()).unwrap();
+        a.sync_receive(&fwd, 4, 4).unwrap();
+        a.layout();
+
+        a.undo(4, 4).unwrap().unwrap();
+        a.layout();
+        assert_eq!(a.text(), " theirs");
+        // The undo is an ordinary edit and syncs like one.
+        let fwd = fake_server(&server, &a.sync_flush().unwrap().unwrap()).unwrap();
+        b.sync_receive(&fwd, 0, 0).unwrap();
+        b.layout();
+        assert_eq!(b.text(), " theirs");
     }
 
     #[test]

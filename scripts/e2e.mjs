@@ -218,6 +218,65 @@ check("menu closed", await ev("document.getElementById('table-menu').hidden"));
 await click(x, y, "right");
 check("no table menu outside tables", await ev("document.getElementById('table-menu').hidden"));
 
+// --- formatting and undo -------------------------------------------------------------------
+const CTRL = 2;
+const SHIFT = 8;
+/** A Ctrl/Shift letter shortcut, e.g. chord("b", CTRL). */
+async function chord(letter, modifiers) {
+  const k = letter.toUpperCase();
+  const base = { key: modifiers & SHIFT ? k : letter, code: `Key${k}`, windowsVirtualKeyCode: k.charCodeAt(0), modifiers };
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+}
+const fmt = () => ev("(() => { const s = window.opendox.view.formatState(); return { bold: s.bold, italic: s.italic, align: s.align, font: s.font }; })()");
+/** Font ids drawn on page 0. Demo order: 0 sans, 1 bold, 2 italic, 3 bold italic, 4-7 serif. */
+const fontsOnPage = () => ev(`(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set();
+  for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s].sort((a, b) => a - b); })()`);
+const pressed = (id) => ev(`document.getElementById(${JSON.stringify(id)}).getAttribute('aria-pressed') === 'true'`);
+
+// 17. Select "Section", Ctrl+B, undo, redo.
+const s1 = (await text()).indexOf("Section 1");
+[x, y] = await clientOf(s1);
+await click(x, y);
+for (let i = 0; i < 7; i++) await key("ArrowRight", SHIFT);
+await chord("b", CTRL);
+check("Ctrl+B bolds the selection", (await fontsOnPage()).includes(1) && (await fmt()).bold, JSON.stringify(await fontsOnPage()));
+check("toolbar shows bold", await pressed("bold"));
+await chord("z", CTRL);
+check("Ctrl+Z undoes bold", !(await fontsOnPage()).includes(1), JSON.stringify(await fontsOnPage()));
+check("undo restores the selection", JSON.stringify(await sel()) === `[${s1},${s1 + 7}]`, JSON.stringify(await sel()));
+await chord("y", CTRL);
+check("Ctrl+Y redoes it", (await fontsOnPage()).includes(1));
+
+// 18. Ctrl+Shift+E centres the paragraph.
+const leftX = (await clientOf(s1))[0];
+await chord("e", CTRL | SHIFT);
+check("Ctrl+Shift+E centres", (await fmt()).align === "center" && (await clientOf(s1))[0] > leftX + 100, `${(await fmt()).align} ${leftX} -> ${(await clientOf(s1))[0]}`);
+check("toolbar shows centre", (await ev("document.querySelector('[data-align=center]').getAttribute('aria-pressed')")) === "true");
+
+// 19. Ctrl+I at a caret applies to what's typed next; undo removes the typing.
+const endOfHeading = s1 + 9;
+[x, y] = await clientOf(endOfHeading);
+await click(x + 1, y);
+await key("End");
+await chord("i", CTRL);
+check("Ctrl+I at a caret shows italic pending", (await fmt()).italic);
+const textBefore = await text();
+await send("Input.insertText", { text: "!" });
+check("typed text is italic", (await fontsOnPage()).includes(2), JSON.stringify(await fontsOnPage()));
+await chord("z", CTRL);
+check("undo removes the typed text", (await text()) === textBefore);
+
+// 20. Toolbar font menu and the Undo button.
+[x, y] = await clientOf(s1);
+await click(x, y);
+for (let i = 0; i < 7; i++) await key("ArrowRight", SHIFT);
+await ev(`(() => { const s = document.getElementById('font'); s.value = 'Noto Serif'; s.dispatchEvent(new Event('change')); })()`);
+check("font menu switches to serif (bold kept)", (await fontsOnPage()).includes(5) && (await fmt()).font === "Noto Serif", JSON.stringify(await fontsOnPage()));
+check("editor keeps focus after the toolbar", await ev("document.activeElement?.className === 'opendox-input'"));
+await click(...(await rectOf("#undo")));
+check("Undo button reverts the font", !(await fontsOnPage()).includes(5) && (await fmt()).font === null);
+
 // 10. Typing latency on a 3-page document.
 const t = await ev(`(async () => { const v = window.opendox.view; const times = [];
   for (let i = 0; i < 20; i++) { const t0 = performance.now(); v.insertText('a'); times.push(performance.now() - t0); }

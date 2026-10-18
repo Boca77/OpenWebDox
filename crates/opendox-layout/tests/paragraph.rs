@@ -32,6 +32,7 @@ fn style(size: f32) -> TextStyle {
         font_family: "Noto Sans, Noto Sans Arabic".into(),
         font_size: size,
         font_weight: 400.0,
+        italic: false,
     }
 }
 

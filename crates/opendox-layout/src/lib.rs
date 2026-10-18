@@ -21,5 +21,6 @@ pub use pagination::{
     TableInput, CELL_PADDING,
 };
 pub use paragraph::{
-    CaretStop, Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, StyleSpan, TextStyle,
+    Align, CaretStop, Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, ParagraphStyle,
+    StyleSpan, TextStyle,
 };
