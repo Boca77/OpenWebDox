@@ -1,5 +1,20 @@
 import init, { Editor } from "../crates/opendox-wasm/pkg/opendox_wasm.js";
-import { EditorView } from "../packages/editor/dist/index.js";
+import { Collaboration, EditorView } from "../packages/editor/dist/index.js";
+
+// Collaboration: open /demo/?doc=<id> in several tabs (needs `npm run sync-server`).
+// Optional: &server=ws://host:port, &name=<display name>.
+const params = new URLSearchParams(location.search);
+const DOC_ID = params.get("doc");
+const SERVER = params.get("server") ?? "ws://127.0.0.1:5175";
+// Collaborator colours carry identity; each keeps white name text above 4.5:1.
+const PEOPLE = [
+  ["Ada", "#0f766e"],
+  ["Grace", "#be185d"],
+  ["Alan", "#b45309"],
+  ["Edsger", "#15803d"],
+  ["Barbara", "#7e22ce"],
+  ["Ken", "#9f1239"],
+];
 
 const FONTS = [
   "../fonts/noto/NotoSans-Regular.ttf",
@@ -36,21 +51,9 @@ async function main() {
   }
   editor.set_default_font("Noto Sans, Noto Sans Arabic", 11);
 
-  const sections = [];
-  for (let i = 1; i <= 4; i++) sections.push(`Section ${i}`, ...ALICE);
-  const text = sections.join("\n");
-  editor.insert(0, text);
-  editor.layout();
-
-  // A sample table at the end of Section 1.
-  const endOfSection1 = cpLen(text.slice(0, text.indexOf("\nSection 2")));
-  let cell = editor.insert_table(endOfSection1, CAST.length, CAST[0].length);
-  for (const value of CAST.flat()) {
-    editor.layout();
-    const after = editor.insert(cell, value);
-    editor.layout();
-    cell = editor.next_cell(after) ?? after;
-  }
+  // A shared document starts from whatever the server has, so no sample text is seeded
+  // (two tabs seeding at once would each add a copy).
+  if (!DOC_ID) seedSample(editor);
 
   const view = new EditorView(editor, $("pages"));
   view.onUpdate = ({ layoutMs, render }) => {
@@ -69,9 +72,56 @@ async function main() {
   setUpTablePicker(view);
   setUpTableMenu(view);
 
+  const collab = DOC_ID ? startCollaboration(editor, view) : null;
+
   // Exposed for automated browser checks.
-  window.opendox = { editor, view };
+  window.opendox = { editor, view, collab };
   document.body.dataset.ready = "true";
+}
+
+function seedSample(editor) {
+  const sections = [];
+  for (let i = 1; i <= 4; i++) sections.push(`Section ${i}`, ...ALICE);
+  const text = sections.join("\n");
+  editor.insert(0, text);
+  editor.layout();
+
+  // A sample table at the end of Section 1.
+  const endOfSection1 = cpLen(text.slice(0, text.indexOf("\nSection 2")));
+  let cell = editor.insert_table(endOfSection1, CAST.length, CAST[0].length);
+  for (const value of CAST.flat()) {
+    editor.layout();
+    const after = editor.insert(cell, value);
+    editor.layout();
+    cell = editor.next_cell(after) ?? after;
+  }
+}
+
+function startCollaboration(editor, view) {
+  const [defaultName, color] = PEOPLE[Math.floor(Math.random() * PEOPLE.length)];
+  const name = params.get("name") ?? defaultName;
+  const url = `${SERVER}/doc/${encodeURIComponent(DOC_ID)}`;
+  const collab = new Collaboration(editor, view, url, { name, color });
+  const LABELS = { connecting: "Connecting…", connected: "Connected", offline: "Offline, retrying" };
+  $("sync").hidden = false;
+  $("s-doc").textContent = DOC_ID;
+  collab.onStatus = (state, peers) => {
+    $("s-sync").textContent = LABELS[state];
+    $("s-sync").dataset.state = state;
+    const you = personItem(`${name} (you)`, color);
+    $("people").replaceChildren(you, ...peers.map((p) => personItem(p.name, p.color)));
+  };
+  collab.connect();
+  return collab;
+}
+
+function personItem(name, color) {
+  const li = document.createElement("li");
+  const swatch = document.createElement("span");
+  swatch.className = "swatch";
+  swatch.style.background = color;
+  li.append(swatch, name);
+  return li;
 }
 
 /** Insert ▸ Table: hover or arrow through a 10 × 10 grid, click or Enter to insert. */

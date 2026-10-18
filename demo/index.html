@@ -44,21 +44,50 @@
         font-size: 13px;
         font-weight: 600;
       }
-      #stats {
+      #stats,
+      .stats {
         margin: 0;
         display: flex;
         gap: 16px;
         color: var(--text-muted);
         font-variant-numeric: tabular-nums;
       }
-      #stats dt {
+      #stats dt,
+      .stats dt {
         display: inline;
       }
-      #stats dd {
+      #stats dd,
+      .stats dd {
         display: inline;
         margin: 0 0 0 4px;
         color: var(--text);
         font-weight: 600;
+      }
+      /* Collaboration: document id, connection state, who's here. */
+      #sync {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      #sync[hidden] {
+        display: none;
+      }
+      #people {
+        display: flex;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      #people li {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #people .swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
       }
       .tools {
         display: flex;
@@ -206,6 +235,13 @@
         <div><dt>Render</dt><dd id="s-render">–</dd></div>
         <div><dt>Cell</dt><dd id="s-cell">–</dd></div>
       </dl>
+      <div id="sync" hidden>
+        <dl class="stats">
+          <div><dt>Doc</dt><dd id="s-doc">–</dd></div>
+          <div><dt>Sync</dt><dd id="s-sync" aria-live="polite">–</dd></div>
+        </dl>
+        <ul id="people" aria-label="People on this document"></ul>
+      </div>
       <div class="tools">
         <div class="picker-wrap">
           <button id="insert-table" class="tool" aria-haspopup="dialog" aria-expanded="false" aria-controls="picker">

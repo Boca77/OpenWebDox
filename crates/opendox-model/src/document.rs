@@ -3,8 +3,8 @@ use std::ops::Range;
 
 use loro::cursor::{Cursor, Side};
 use loro::{
-    Container, ExpandType, ExportMode, LoroDoc, LoroMap, LoroText, StyleConfig, StyleConfigMap,
-    TextDelta, ValueOrContainer, VersionVector,
+    Container, ContainerTrait, ExpandType, ExportMode, LoroDoc, LoroMap, LoroText, StyleConfig,
+    StyleConfigMap, TextDelta, ValueOrContainer, VersionVector,
 };
 
 use crate::error::ModelError;
@@ -48,6 +48,50 @@ pub struct Anchor(Cursor);
 /// only what that replica is missing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Version(VersionVector);
+
+impl Anchor {
+    /// Bytes for sending the anchor to another replica (e.g. a remote caret).
+    pub fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ModelError> {
+        Cursor::decode(bytes)
+            .map(Anchor)
+            .map_err(|e| ModelError::Decode(e.to_string()))
+    }
+}
+
+impl Version {
+    pub fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ModelError> {
+        VersionVector::decode(bytes)
+            .map(Version)
+            .map_err(|e| ModelError::Decode(e.to_string()))
+    }
+
+    /// Adds every edit `other` has seen.
+    pub fn merge(&mut self, other: &Version) {
+        self.0.merge(&other.0);
+    }
+
+    /// Adds every edit `other` has seen, except those made by replica `skip`.
+    pub fn merge_except(&mut self, other: &Version, skip: u64) {
+        for (&peer, &counter) in other.0.iter() {
+            if peer != skip && self.0.get(&peer).is_none_or(|&c| c < counter) {
+                self.0.insert(peer, counter);
+            }
+        }
+    }
+
+    /// Whether this version has seen every edit `other` has.
+    pub fn includes(&self, other: &Version) -> bool {
+        self.0.includes_vv(&other.0)
+    }
+}
 
 impl Default for Document {
     fn default() -> Self {
@@ -211,6 +255,11 @@ impl Document {
             .get_cursor_pos(&anchor.0)
             .map(|r| r.current.pos)
             .map_err(|_| ModelError::AnchorLost)
+    }
+
+    /// This replica's id: the one edits made here are tagged with.
+    pub fn replica_id(&self) -> u64 {
+        self.doc.peer_id()
     }
 
     /// The edits this replica has seen so far.
@@ -437,6 +486,55 @@ impl Document {
         Ok(pos)
     }
 
+    /// Creates an anchor at flat position `pos`, in body text or in a cell. Like
+    /// [`Document::anchor`], it follows the text it sits next to through other replicas' edits.
+    pub fn anchor_at(&self, outline: &Outline, pos: usize) -> Result<Anchor, ModelError> {
+        let loc = outline.locate(outline.snap(pos));
+        let (text, offset) = match &loc.container {
+            TextRef::Body => (self.body(), loc.offset),
+            TextRef::Cell(c) => match self.existing_cell(c) {
+                Some(text) => (text, loc.offset),
+                // A cell that was never written has no container to anchor to (creating one
+                // here would be an edit); the table's placeholder is the nearest stable spot.
+                None => {
+                    let t = outline.table(&c.table).ok_or(ModelError::NoSuchTable)?;
+                    (self.body(), t.placeholder)
+                }
+            },
+        };
+        text.get_cursor(offset, Side::Middle)
+            .map(Anchor)
+            .ok_or(ModelError::AnchorLost)
+    }
+
+    /// Current flat position of an anchor from [`Document::anchor_at`], or `None` if the cell or
+    /// table it was in has been deleted. `outline` must describe the current state.
+    pub fn resolve_at(&self, outline: &Outline, anchor: &Anchor) -> Option<usize> {
+        let pos = self.doc.get_cursor_pos(&anchor.0).ok()?.current.pos;
+        let id = &anchor.0.container;
+        if *id == self.body().id() {
+            return Some(outline.snap(outline.flat_of_body(pos)));
+        }
+        for t in outline.tables() {
+            let Some(handle) = self.table(&t.id) else {
+                continue;
+            };
+            let columns = handle.columns();
+            for (r, row) in handle.rows().iter().enumerate() {
+                for (c, col) in columns.iter().enumerate() {
+                    if cell_container(row, col).is_none_or(|text| text.id() != *id) {
+                        continue;
+                    }
+                    let slots = &outline.slots[t.cells.get(r)?.get(c)?.clone()];
+                    let slot = slots.iter().rev().find(|s| s.offset <= pos)?;
+                    let within = (pos - slot.offset).min(slot.text.chars().count());
+                    return Some(slot.flat + within);
+                }
+            }
+        }
+        None
+    }
+
     /// Delete key at a caret: the mirror of [`Document::delete_backward_at`].
     pub fn delete_forward_at(&self, outline: &Outline, pos: usize) -> Result<usize, ModelError> {
         if let Some(next) = outline.next_in_slot(pos) {
@@ -498,6 +596,14 @@ impl Document {
             TextRef::Body => Ok(self.body()),
             TextRef::Cell(c) => self.cell(c),
         }
+    }
+
+    /// A cell's text container if it exists, without creating it.
+    fn existing_cell(&self, c: &CellRef) -> Option<LoroText> {
+        let t = self.table(&c.table)?;
+        let col = t.columns().get(c.col).cloned()?;
+        let row = t.rows().get(c.row).cloned()?;
+        cell_container(&row, &col)
     }
 
     /// A cell's text container, created if a concurrent column/row change left it missing.
@@ -669,6 +775,91 @@ mod tests {
         let caret = d.anchor(5).unwrap();
         d.insert(0, "é").unwrap();
         assert_eq!(d.resolve(&caret).unwrap(), 6);
+    }
+
+    #[test]
+    fn cell_anchor_travels_to_another_replica_and_follows_edits() {
+        let a = Document::with_replica_id(1).unwrap();
+        let b = Document::with_replica_id(2).unwrap();
+        a.insert(0, "intro").unwrap();
+        let t = a.insert_table(5, 2, 2).unwrap();
+        let o = a.outline();
+        let c11 = o.cell_start(&t, 1, 1).unwrap();
+        a.insert_at(&o, c11, "world").unwrap();
+        sync(&a, &b);
+
+        // A's caret between "wor" and "ld", sent to B as bytes.
+        let o = a.outline();
+        let bytes = a.anchor_at(&o, c11 + 3).unwrap().encode();
+        let on_b = Anchor::decode(&bytes).unwrap();
+
+        // B types before it in the same cell, and in the body before the table.
+        let ob = b.outline();
+        b.insert_at(&ob, ob.cell_start(&t, 1, 1).unwrap(), "hi ")
+            .unwrap();
+        b.insert(0, ">").unwrap();
+        let ob = b.outline();
+        let at = b.resolve_at(&ob, &on_b).unwrap();
+        assert_eq!(ob.slice(at - 6, at), "hi wor");
+        assert_eq!(ob.cell_at(at).map(|c| (c.row, c.col)), Some((1, 1)));
+
+        // Body anchors resolve through the same call.
+        let body = b.anchor_at(&ob, 3).unwrap();
+        b.insert(0, "x").unwrap();
+        assert_eq!(b.resolve_at(&b.outline(), &body), Some(4));
+
+        // Deleting the table loses the cell anchor.
+        b.delete_table(&t).unwrap();
+        assert_eq!(b.resolve_at(&b.outline(), &on_b), None);
+    }
+
+    #[test]
+    fn anchor_in_a_never_written_cell_falls_back_to_the_table() {
+        let a = Document::with_replica_id(1).unwrap();
+        let b = Document::with_replica_id(2).unwrap();
+        a.insert(0, "ab").unwrap();
+        let t = a.insert_table(2, 1, 1).unwrap();
+        sync(&a, &b);
+        // A concurrent row + column insert leaves cell (1, 1) without a container.
+        a.insert_row(&t, 1).unwrap();
+        b.insert_column(&t, 1).unwrap();
+        sync(&a, &b);
+        let o = a.outline();
+        let before = a.version();
+        let anchor = a.anchor_at(&o, o.cell_start(&t, 1, 1).unwrap()).unwrap();
+        assert_eq!(a.version(), before, "anchoring must not edit the document");
+        let at = a.resolve_at(&o, &anchor).unwrap();
+        assert_eq!(o.snap(at), at);
+        assert!(matches!(
+            Anchor::decode(b"\xff\xff"),
+            Err(ModelError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn versions_encode_and_merge_without_a_replica() {
+        let a = Document::with_replica_id(1).unwrap();
+        let b = Document::with_replica_id(2).unwrap();
+        a.insert(0, "aaa").unwrap();
+        b.insert(0, "bb").unwrap();
+        sync(&a, &b);
+        let v = Version::decode(&a.version().encode()).unwrap();
+        assert_eq!(v, a.version());
+
+        let mut known = Version::default();
+        known.merge_except(&a.version(), 1);
+        assert!(!known.includes(&a.version()));
+        // Everything except replica 1's edits: exporting since `known` sends only "aaa".
+        let fresh = Document::new();
+        fresh
+            .import(&b.export_updates_since(&Version::default()).unwrap())
+            .unwrap();
+        let only_a = Document::new();
+        only_a
+            .import(&a.export_updates_since(&known).unwrap())
+            .unwrap();
+        assert_eq!(only_a.text(), "aaa");
+        assert_eq!(a.replica_id(), 1);
     }
 
     #[test]

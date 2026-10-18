@@ -51,6 +51,15 @@ export interface TableInfo {
   cols: number;
 }
 
+/** Another person's selection, as positions per the last layout. */
+export interface RemoteSelection {
+  name: string;
+  /** CSS colour; dark enough for white text, since it is also the name flag's background. */
+  color: string;
+  anchor: number;
+  focus: number;
+}
+
 export type TableCommand =
   | "insertRowAbove"
   | "insertRowBelow"
@@ -74,6 +83,12 @@ const STYLES = `
 .opendox-editor:not(.opendox-focused) .opendox-caret { display: none; }
 .opendox-selection { position: absolute; background: rgb(47 91 211 / 0.28); }
 .opendox-editor:not(.opendox-focused) .opendox-selection { background: rgb(74 81 92 / 0.18); }
+.opendox-remote-caret { position: absolute; width: 2px; margin-left: -1px; }
+.opendox-remote-name {
+  position: absolute; bottom: 100%; left: 0; padding: 0 4px; border-radius: 2px 2px 2px 0;
+  color: #fff; font: 600 11px/16px system-ui, sans-serif; white-space: nowrap;
+}
+.opendox-remote-selection { position: absolute; }
 .opendox-input {
   position: absolute; z-index: 2; margin: 0; padding: 0; border: 0; outline: none;
   resize: none; overflow: hidden; white-space: pre; opacity: 0; width: 2px;
@@ -99,7 +114,11 @@ export class EditorView {
   onUpdate?: (stats: EditStats) => void;
   /** Called whenever the caret or selection moves. */
   onSelectionChange?: () => void;
+  /** Other people's selections, drawn with the local one. Set by `Collaboration`. */
+  remoteSelections?: () => RemoteSelection[];
 
+  private readonly editListeners: (() => void)[] = [];
+  private readonly selectionListeners: (() => void)[] = [];
   private readonly input: HTMLTextAreaElement;
   private anchor = 0;
   private focus = 0;
@@ -153,6 +172,22 @@ export class EditorView {
     return { anchor: this.anchor, focus: this.focus };
   }
 
+  /** Listens for local edits (`"edit"`) or caret/selection moves (`"selection"`). */
+  on(event: "edit" | "selection", listener: () => void): void {
+    (event === "edit" ? this.editListeners : this.selectionListeners).push(listener);
+  }
+
+  /**
+   * Applies a change made elsewhere (a remote edit): moves the selection to where the engine
+   * remapped it and redraws. Pass the current selection to only redraw remote carets.
+   */
+  applyRemote(anchor: number, focus: number, docChanged: boolean): void {
+    this.anchor = anchor;
+    this.focus = focus;
+    if (docChanged) this.relayout();
+    else this.drawSelection();
+  }
+
   focusEditor(): void {
     this.input.focus({ preventScroll: true });
   }
@@ -169,7 +204,7 @@ export class EditorView {
     const at = this.deleteSelectionRaw();
     const after = this.engine.insert(at, clean);
     this.collapseTo(after, false);
-    this.relayout();
+    this.edited();
   }
 
   /** Inserts a table at the caret and puts the caret in its first cell. */
@@ -177,7 +212,7 @@ export class EditorView {
     const at = this.deleteSelectionRaw();
     const cell = this.engine.insert_table(at, rows, cols);
     this.collapseTo(cell, false);
-    this.relayout();
+    this.edited();
   }
 
   /** Where the caret is in a table, or `undefined` outside tables. */
@@ -201,7 +236,7 @@ export class EditorView {
       deleteTable: () => e.table_delete(at),
     }[command]();
     this.collapseTo(to, false);
-    this.relayout();
+    this.edited();
   }
 
   /** Lays out, redraws pages and the caret. Call after changing the document from outside. */
@@ -215,6 +250,12 @@ export class EditorView {
     this.focus = Math.min(this.focus, len);
     this.drawSelection();
     this.onUpdate?.({ layoutMs, render });
+  }
+
+  /** Relayout after a local edit, and tell edit listeners. */
+  private edited(): void {
+    this.relayout();
+    for (const l of this.editListeners) l();
   }
 
   // --- pointer ---------------------------------------------------------------------------
@@ -368,7 +409,7 @@ export class EditorView {
       to = this.engine.next_cell(this.focus);
     }
     if (to !== undefined) this.collapseTo(to, false);
-    this.relayout();
+    this.edited();
   }
 
   private deleteBackward(): void {
@@ -377,7 +418,7 @@ export class EditorView {
         ? this.deleteSelectionRaw()
         : this.engine.delete_backward(this.focus);
     this.collapseTo(pos, false);
-    this.relayout();
+    this.edited();
   }
 
   private deleteForward(): void {
@@ -386,7 +427,7 @@ export class EditorView {
         ? this.deleteSelectionRaw()
         : this.engine.delete_forward(this.focus);
     this.collapseTo(pos, false);
-    this.relayout();
+    this.edited();
   }
 
   // --- text input and IME ----------------------------------------------------------------
@@ -401,7 +442,7 @@ export class EditorView {
     // Typing replaces the selection; remove it now so the preedit sits where text will go.
     if (this.anchor !== this.focus) {
       this.deleteSelectionRaw();
-      this.relayout();
+      this.edited();
     }
     this.input.classList.add("opendox-composing");
   }
@@ -433,7 +474,7 @@ export class EditorView {
     e.clipboardData?.setData("text/plain", this.engine.slice(lo, hi));
     if (cut) {
       this.deleteSelectionRaw();
-      this.relayout();
+      this.edited();
     }
   }
 
@@ -466,9 +507,12 @@ export class EditorView {
   /** Redraws selection boxes and the caret, and moves the textarea to the caret. */
   private drawSelection(): void {
     const k = this.renderer.cssPerPt;
-    for (const el of this.container.querySelectorAll(".opendox-caret, .opendox-selection")) {
+    for (const el of this.container.querySelectorAll(
+      ".opendox-caret, .opendox-selection, .opendox-remote-caret, .opendox-remote-selection",
+    )) {
       el.remove();
     }
+    for (const r of this.remoteSelections?.() ?? []) this.drawRemote(r);
     if (this.anchor !== this.focus) {
       const rects = this.engine.selection_rects(this.anchor, this.focus);
       for (let i = 0; i < rects.length; i += RECT_STRIDE) {
@@ -479,6 +523,7 @@ export class EditorView {
       }
     }
     this.onSelectionChange?.();
+    for (const l of this.selectionListeners) l();
 
     const caret = this.engine.caret_rect(this.focus, this.upstream);
     if (!caret) return;
@@ -503,6 +548,37 @@ export class EditorView {
 
     const focusEl = this.anchor === this.focus ? this.renderer.overlay(page)?.lastElementChild : null;
     (focusEl as HTMLElement | null)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  /** Another person's selection wash and caret, with their name above the caret. */
+  private drawRemote(r: RemoteSelection): void {
+    const k = this.renderer.cssPerPt;
+    const len = this.engine.len();
+    const [a, f] = [Math.min(r.anchor, len), Math.min(r.focus, len)];
+    if (a !== f) {
+      const rects = this.engine.selection_rects(a, f);
+      for (let i = 0; i < rects.length; i += RECT_STRIDE) {
+        const box = document.createElement("div");
+        box.className = "opendox-remote-selection";
+        box.style.background = `color-mix(in srgb, ${r.color} 22%, transparent)`;
+        placeBox(box, rects[i + 1] * k, rects[i + 2] * k, rects[i + 3] * k, rects[i + 4] * k);
+        this.renderer.overlay(rects[i])?.append(box);
+      }
+    }
+    const caret = this.engine.caret_rect(f, false);
+    if (!caret) return;
+    const [page, x, top, bottom] = caret;
+    const el = document.createElement("div");
+    el.className = "opendox-remote-caret";
+    el.style.background = r.color;
+    placeBox(el, x * k, top * k, 0, (bottom - top) * k);
+    el.style.width = "";
+    const name = document.createElement("span");
+    name.className = "opendox-remote-name";
+    name.style.background = r.color;
+    name.textContent = r.name;
+    el.append(name);
+    this.renderer.overlay(page)?.append(el);
   }
 }
 

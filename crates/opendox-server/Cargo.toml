@@ -1,0 +1,22 @@
+[package]
+name = "opendox-server"
+description = "opendox WebSocket sync server with pluggable storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+opendox-model.workspace = true
+opendox-sync.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

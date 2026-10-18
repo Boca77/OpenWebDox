@@ -9,6 +9,8 @@
     "build:wasm": "wasm-pack build crates/opendox-wasm --target web --release",
     "build": "npm run build:wasm && npm run build -w @opendox/editor",
     "serve": "node scripts/serve.mjs",
-    "e2e": "node scripts/e2e.mjs"
+    "e2e": "node scripts/e2e.mjs",
+    "sync-server": "cargo run -p opendox-server --release --",
+    "e2e:collab": "node scripts/e2e-collab.mjs"
   }
 }

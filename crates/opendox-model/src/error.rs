@@ -24,6 +24,10 @@ pub enum ModelError {
     #[error("could not decode update: {0}")]
     Import(String),
 
+    /// Bytes from [`crate::Anchor::encode`] or [`crate::Version::encode`] were malformed.
+    #[error("could not decode: {0}")]
+    Decode(String),
+
     /// An error from the underlying CRDT that callers can't act on beyond reporting it.
     #[error("CRDT error: {0}")]
     Crdt(String),

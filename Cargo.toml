@@ -18,8 +18,16 @@ parley = { version = "0.12.0", default-features = false }
 # Same version parley uses internally, so it isn't compiled twice.
 skrifa = "0.44.0"
 wasm-bindgen = "0.2.129"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
+axum = { version = "0.8.9", features = ["ws"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+# Bundled: compiles SQLite from source, so no system library is needed.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Same tungstenite version axum uses, so it isn't compiled twice.
+tokio-tungstenite = "0.29.0"
 opendox-model = { path = "crates/opendox-model" }
 opendox-layout = { path = "crates/opendox-layout" }
+opendox-sync = { path = "crates/opendox-sync" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

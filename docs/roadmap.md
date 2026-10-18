@@ -55,10 +55,16 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
   left/right, delete row/column/table), Tab / Shift+Tab, Tab in last cell adds a row.
 - `npm run e2e` covers clicking/typing in cells, Tab, Arrow Down, the picker and the menu.
 
-## M6 — Sync server
+## M6 — Sync server ✅
+`npm run e2e:collab` drives two Chrome tabs through the real server (needs `npm run serve` and
+`npm run sync-server`). Tested on one machine over localhost only.
 - WebSocket server sharing `opendox-model`; storage trait with SQLite adapter; update batching;
   snapshot compaction with watermark; remote carets/presence.
 - Done: two browsers edit the same doc live; offline edits merge on reconnect; compaction test.
+- Built: `opendox-sync` (protocol + client session state, D10), `opendox-server` (axum WebSocket
+  at `/doc/{id}`, `Storage` trait with SQLite and in-memory adapters, compaction every 200
+  updates and when the last client leaves), wasm sync calls, `Collaboration` in the editor
+  package (batched sends every 30 ms, reconnect with backoff, remote carets with name flags).
 
 ## M7 — Rich text and undo
 - Bold/italic/size/font marks, paragraph attributes (alignment, spacing), local-only undo/redo.
@@ -66,7 +72,7 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
 ## Known debt
 - `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
   now; must become per-paragraph before large documents are usable.
-- WASM bundle is 3.0 MB (mostly Loro), not size-tuned yet (no LTO / opt-level "z").
+- WASM bundle is 4.3 MB (mostly Loro), not size-tuned yet (no LTO / opt-level "z").
 - Renderer draws every page on every render; should draw only pages in view.
 - No emoji or CJK font bundled: those characters render as empty boxes (layout is correct).
 - Pagination restacks every line on every call.
@@ -81,6 +87,15 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
   header-row repeat, no "keep row together" option (rows always split when they don't fit), no
   cell-rectangle selection (selection inside a table is linear, row by row), no cell
   background/border styles.
+- Sync server has no authentication or authorization: anyone who can reach it can open and
+  edit any document id. It binds to 127.0.0.1 by default. Needs an auth trait (D4).
+- Server storage calls are synchronous and run on the async runtime's threads while the room is
+  locked. Fine for local SQLite; a networked store needs its own queue.
+- Presence names and colours are whatever the client sends; nothing stops two people picking
+  the same colour.
+- A client keeps unsent edits only in memory: closing the tab while offline loses them. Needs
+  local persistence (IndexedDB).
+- Remote edits relayout the whole document, like local ones.
 - Outline and `Document::text` rebuild from the whole document on every keystroke (O(n)). Cheap (arithmetic only), but could stop early
   once page breaks match the previous pass.
 

@@ -8,7 +8,8 @@ use opendox_layout::{
     BlockInput, FontId, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput,
     TableInput, TextPosition, TextStyle,
 };
-use opendox_model::{Block, Document, Outline};
+use opendox_model::{Anchor, Block, Document, Outline};
+use opendox_sync::{Presence, SyncClient};
 use wasm_bindgen::prelude::*;
 
 /// Floats per glyph in [`Editor::page_glyphs`].
@@ -28,7 +29,15 @@ pub struct Editor {
     style: TextStyle,
     /// Document structure as of the last [`Editor::layout`]; maps flat positions to layout.
     outline: Outline,
+    sync: SyncClient,
+    /// A message produced while handling a server message, waiting for [`Editor::sync_flush`].
+    sync_reply: Option<Vec<u8>>,
 }
+
+/// Bit set in [`Editor::sync_receive`]'s flags when the document changed.
+pub const SYNC_DOC_CHANGED: u32 = 1;
+/// Bit set when a remote caret appeared, moved or left.
+pub const SYNC_PEERS_CHANGED: u32 = 2;
 
 impl Default for Editor {
     fn default() -> Self {
@@ -53,6 +62,8 @@ impl Editor {
                 font_weight: 400.0,
             },
             outline,
+            sync: SyncClient::new(),
+            sync_reply: None,
         }
     }
 
@@ -222,6 +233,119 @@ impl Editor {
         self.doc.delete_table(&id)?;
         let fresh = self.doc.outline();
         Ok(fresh.snap(fresh.flat_of_body(placeholder)))
+    }
+
+    // --- collaboration --------------------------------------------------------------------
+
+    /// Starts a sync session on a new connection (also after a reconnect). Send the returned
+    /// bytes first. Editing works the whole time; edits made offline go out once synced.
+    pub fn sync_connect(&mut self) -> Vec<u8> {
+        self.sync_reply = None;
+        self.sync.connect(&self.doc)
+    }
+
+    /// The connection dropped: stop sending and forget remote carets.
+    pub fn sync_disconnected(&mut self) {
+        self.sync_reply = None;
+        self.sync.disconnected();
+    }
+
+    /// Whether the handshake has finished and edits are flowing.
+    pub fn sync_is_synced(&self) -> bool {
+        self.sync.is_synced()
+    }
+
+    /// The next message to send: a pending reply, or every local edit not yet sent, batched
+    /// into one message. `undefined` when there's nothing to send. Call after
+    /// [`Editor::sync_receive`] and on a short timer after local edits.
+    pub fn sync_flush(&mut self) -> Result<Option<Vec<u8>>, JsError> {
+        if let Some(reply) = self.sync_reply.take() {
+            return Ok(Some(reply));
+        }
+        Ok(self.sync.flush(&self.doc)?)
+    }
+
+    /// Handles a message from the server. `anchor` and `focus` are the local selection (per
+    /// the last layout); returns `[flags, anchor, focus]` with the selection moved to follow
+    /// remote edits. `flags` combines [`SYNC_DOC_CHANGED`] and [`SYNC_PEERS_CHANGED`]. Call
+    /// [`Editor::layout`] after a document change.
+    pub fn sync_receive(
+        &mut self,
+        message: &[u8],
+        anchor: usize,
+        focus: usize,
+    ) -> Result<Vec<u32>, JsError> {
+        // Pin the selection to the text around it before remote edits shift positions.
+        let pinned = [anchor, focus].map(|p| self.doc.anchor_at(&self.outline, p).ok());
+        let r = self.sync.receive(&self.doc, message)?;
+        if r.reply.is_some() {
+            self.sync_reply = r.reply;
+        }
+        let mut out = vec![0, anchor as u32, focus as u32];
+        if r.doc_changed {
+            out[0] |= SYNC_DOC_CHANGED;
+            let fresh = self.doc.outline();
+            for (i, (pin, old)) in pinned.iter().zip([anchor, focus]).enumerate() {
+                let pos = pin
+                    .as_ref()
+                    .and_then(|a| self.doc.resolve_at(&fresh, a))
+                    // Its cell or table was deleted: stay roughly where it was.
+                    .unwrap_or_else(|| fresh.snap(old.min(fresh.len)));
+                out[i + 1] = pos as u32;
+            }
+        }
+        if r.peers_changed {
+            out[0] |= SYNC_PEERS_CHANGED;
+        }
+        Ok(out)
+    }
+
+    /// This client's presence message: name, CSS colour and selection (positions per the last
+    /// layout). With `visible` false the caret is hidden from others (e.g. editor unfocused).
+    pub fn sync_presence(
+        &self,
+        name: &str,
+        color: &str,
+        anchor: usize,
+        focus: usize,
+        visible: bool,
+    ) -> Result<Vec<u8>, JsError> {
+        let selection = if visible {
+            let a = self.doc.anchor_at(&self.outline, anchor)?;
+            let f = self.doc.anchor_at(&self.outline, focus)?;
+            Some((a.encode(), f.encode()))
+        } else {
+            None
+        };
+        Ok(SyncClient::presence_message(&Presence {
+            name: name.to_owned(),
+            color: color.to_owned(),
+            selection,
+        }))
+    }
+
+    /// Connection ids of the other people on this document.
+    pub fn peer_ids(&self) -> Vec<u32> {
+        self.sync.peers().keys().copied().collect()
+    }
+
+    pub fn peer_name(&self, id: u32) -> Option<String> {
+        self.sync.peers().get(&id).map(|p| p.name.clone())
+    }
+
+    pub fn peer_color(&self, id: u32) -> Option<String> {
+        self.sync.peers().get(&id).map(|p| p.color.clone())
+    }
+
+    /// A peer's selection as `[anchor, focus]` per the last layout, or `undefined` if it's
+    /// hidden or points at text this replica doesn't have (yet).
+    pub fn peer_selection(&self, id: u32) -> Option<Vec<u32>> {
+        let (a, f) = self.sync.peers().get(&id)?.selection.as_ref()?;
+        let resolve = |bytes: &[u8]| {
+            let anchor = Anchor::decode(bytes).ok()?;
+            self.doc.resolve_at(&self.outline, &anchor)
+        };
+        Some(vec![resolve(a)? as u32, resolve(f)? as u32])
     }
 
     // --- layout and geometry -------------------------------------------------------------
@@ -545,6 +669,103 @@ mod tests {
         e.layout();
         assert_eq!(e.table_info(at), None);
         assert_eq!(e.len(), 0);
+    }
+
+    /// A stand-in server: answers the handshake, keeps edits, relays presence as client 1.
+    fn fake_server(server: &Document, msg: &[u8]) -> Option<Vec<u8>> {
+        use opendox_model::Version;
+        use opendox_sync::Message;
+        match Message::decode(msg).unwrap() {
+            Message::SyncRequest { version } => Some(
+                Message::SyncReply {
+                    updates: server
+                        .export_updates_since(&Version::decode(&version).unwrap())
+                        .unwrap(),
+                    version: server.version().encode(),
+                }
+                .encode(),
+            ),
+            Message::Update { updates } => {
+                server.import(&updates).unwrap();
+                Some(msg.to_vec()) // forwarded as-is to the other client
+            }
+            Message::Presence { payload, .. } => {
+                Some(Message::Presence { client: 1, payload }.encode())
+            }
+            _ => None,
+        }
+    }
+
+    fn join(e: &mut Editor, server: &Document) {
+        let hello = e.sync_connect();
+        let reply = fake_server(server, &hello).unwrap();
+        e.sync_receive(&reply, 0, 0).unwrap();
+        e.layout();
+        while let Some(m) = e.sync_flush().unwrap() {
+            fake_server(server, &m);
+        }
+        assert!(e.sync_is_synced());
+    }
+
+    #[test]
+    fn remote_edits_move_the_local_caret_and_remote_carets_resolve() {
+        let server = Document::new();
+        let mut a = editor_with("hello world");
+        let mut b = editor_with("");
+        join(&mut a, &server);
+        join(&mut b, &server);
+        assert_eq!(b.text(), "hello world");
+
+        // B's caret sits before "world"; A types at the start.
+        a.insert(0, ">> ").unwrap();
+        a.layout();
+        let update = a.sync_flush().unwrap().unwrap();
+        let forwarded = fake_server(&server, &update).unwrap();
+        let r = b.sync_receive(&forwarded, 6, 6).unwrap();
+        assert_eq!(r, vec![SYNC_DOC_CHANGED, 9, 9]);
+        b.layout();
+        assert_eq!(b.slice(9, 14), "world");
+        // Nothing to echo back.
+        assert!(b.sync_flush().unwrap().is_none());
+
+        // A's caret, as B sees it.
+        let p = a.sync_presence("Ada", "#0f766e", 3, 8, true).unwrap();
+        let relayed = fake_server(&server, &p).unwrap();
+        assert_eq!(
+            b.sync_receive(&relayed, 0, 0).unwrap()[0],
+            SYNC_PEERS_CHANGED
+        );
+        assert_eq!(b.peer_ids(), vec![1]);
+        assert_eq!(b.peer_name(1).as_deref(), Some("Ada"));
+        assert_eq!(b.peer_selection(1), Some(vec![3, 8]));
+
+        // A local edit in B before it shifts it after relayout.
+        b.insert(0, "!").unwrap();
+        b.layout();
+        assert_eq!(b.peer_selection(1), Some(vec![4, 9]));
+
+        b.sync_disconnected();
+        assert!(b.peer_ids().is_empty());
+        assert!(!b.sync_is_synced());
+    }
+
+    #[test]
+    fn caret_in_a_deleted_table_lands_nearby() {
+        let server = Document::new();
+        let mut a = editor_with("ab");
+        let c00 = a.insert_table(2, 2, 2).unwrap();
+        a.layout();
+        let mut b = editor_with("");
+        join(&mut a, &server);
+        join(&mut b, &server);
+        // B's caret in a cell; A deletes the table.
+        a.table_delete(c00).unwrap();
+        a.layout();
+        let fwd = fake_server(&server, &a.sync_flush().unwrap().unwrap()).unwrap();
+        let r = b.sync_receive(&fwd, c00, c00).unwrap();
+        b.layout();
+        assert!(r[1] as usize <= b.len());
+        assert_eq!(b.text(), a.text());
     }
 
     #[test]

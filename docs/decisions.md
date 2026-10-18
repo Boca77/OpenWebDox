@@ -68,5 +68,27 @@ Known risk: two replicas creating the same missing cell concurrently (only possi
 concurrent row + column insert) keep one container; the other's text in that cell is lost.
 Rejected: tables as flat start/cell/end markers (needs repair after every concurrent edit).
 
+## D10 — Sync: version handshake, then batched updates through a hub server (2026-10-18)
+Clients talk to one server per document over a WebSocket (`/doc/{id}`), not peer to peer.
+- On connect the client sends its Loro version; the server replies with what the client lacks
+  plus its own version, and the client sends back what the server lacks. That one exchange
+  covers first load, reconnect and offline edits alike, so there is no separate offline queue.
+- Clients batch local edits (one message per ~30 ms) and never echo back what they received:
+  the client tracks what the server has, merging in every remote edit it imports.
+- The server keeps a live replica per open document, stores each new update as a row, and
+  forwards only the newly applied part (never a client's resend) to the others.
+- Storage is a snapshot plus updates after a watermark (the last update the snapshot contains).
+  Compaction writes snapshot + watermark and deletes updates at or below it, in one
+  transaction; an older watermark never replaces a newer one.
+- Presence (name, colour, selection as encoded Loro cursors) is relayed, not stored. Cursors
+  resolve in each replica, so a remote caret stays on its text through edits. Model anchors
+  now work inside table cells too.
+- A client that falls behind (outbox full) is disconnected rather than buffered without limit;
+  the handshake on reconnect catches it up.
+- Protocol and client state live in `opendox-sync`, with no I/O, so the browser (via wasm) and
+  native tests run the same code. Server: axum + tokio, rusqlite (bundled SQLite).
+Rejected: Loro's own awareness/ephemeral store (would expose Loro types past `opendox-model`);
+sending every keystroke as its own message.
+
 ## Open
 - Colour emoji rendering.

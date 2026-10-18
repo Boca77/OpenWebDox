@@ -17,10 +17,11 @@ paginated print-accurate layout. Layout quality is the product: treat it as the 
 crates/
   opendox-model    document model on top of Loro (text, paragraphs, marks, positions)
   opendox-layout   shaping, line breaking, pagination, hit testing — no Loro dependency
-  opendox-wasm     wasm-bindgen bindings for model + layout
-  opendox-server   WebSocket sync server (later)
+  opendox-sync     sync protocol + client session state, no I/O (used by wasm and server)
+  opendox-wasm     wasm-bindgen bindings for model + layout + sync
+  opendox-server   WebSocket sync server (axum), storage trait, SQLite adapter
 packages/
-  editor           TS: canvas renderer, input (hidden textarea, IME), selection
+  editor           TS: canvas renderer, input (hidden textarea, IME), selection, collaboration
 demo/              dev harness page (plain ES modules, no bundler)
 scripts/serve.mjs  zero-dependency static server for the demo
 docs/
@@ -68,7 +69,11 @@ npm install            # once
 npm run build          # wasm-pack build of opendox-wasm + tsc for packages/editor
 npm run serve          # demo at http://127.0.0.1:5174/demo/
 npm run e2e            # browser interaction checks (needs serve running)
+npm run sync-server    # sync server at ws://127.0.0.1:5175 (SQLite in the temp folder; --memory)
+npm run e2e:collab     # two-tab collaboration checks (needs serve + sync-server running)
 ```
+
+Collaborative demo: open `http://127.0.0.1:5174/demo/?doc=<any-id>` in two tabs.
 
 Headless screenshots for visual checks:
 `chrome.exe --headless=new --window-size=900,1150 --virtual-time-budget=10000 --screenshot=<png> http://127.0.0.1:5174/demo/`.
