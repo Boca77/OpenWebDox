@@ -12,6 +12,10 @@
 mod document;
 mod error;
 mod grapheme;
+mod outline;
+mod table;
 
 pub use document::{Anchor, Document, Paragraph, Version};
 pub use error::ModelError;
+pub use outline::{Block, Location, Outline, Slot, TableBlock, TextRef};
+pub use table::{CellRef, TABLE_PLACEHOLDER};

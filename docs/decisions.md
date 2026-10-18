@@ -52,5 +52,21 @@ complex, blurry when zoomed) isn't needed. Chrome and Edge screenshots were byte
 Known limits: no hinting, so small text is slightly softer than native text; colour emoji
 (COLR/CBDT) can't be drawn this way and need separate handling.
 
+## D9 — Tables: body placeholder + column-keyed table containers (2026-10-18)
+A table is one U+FFFC character in the body text, marked `table = <id>` (mark expand: none), plus
+`tables[id] = { columns: MovableList<column id>, rows: MovableList<Map<column id, Text>> }`.
+- Keeping the table's place as a body character means splitting paragraphs and typing around a
+  table stay ordinary text edits, which are concurrency-safe. (A list-of-block-containers model
+  loses text typed concurrently into the tail of a paragraph being split.)
+- Cells keyed by column id, not index, so a column added or removed concurrently with a new row
+  still lines up; missing cells read as empty and are created on first write.
+- Editors use one "flat position" space: body chars, with each table replaced by its cells in
+  reading order. The JS side stays number-based.
+- Selection/delete rules: within one table across cells → clear those cells; spanning body and a
+  table → remove the whole table. Backspace/Delete never cross a cell or table edge.
+Known risk: two replicas creating the same missing cell concurrently (only possible after a
+concurrent row + column insert) keep one container; the other's text in that cell is lost.
+Rejected: tables as flat start/cell/end markers (needs repair after every concurrent edit).
+
 ## Open
 - Colour emoji rendering.

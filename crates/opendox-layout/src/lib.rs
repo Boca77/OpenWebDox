@@ -15,8 +15,11 @@ mod pagination;
 mod paragraph;
 
 pub use fonts::{FontId, FontLibrary, GlyphOutline};
-pub use navigation::{CaretRect, PlacedLine, SelectionRect, TextPosition};
-pub use pagination::{Fragment, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph};
+pub use navigation::{CaretRect, PlacedLine, Rect, SelectionRect, TextPosition};
+pub use pagination::{
+    BlockInput, Fragment, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph, Rule,
+    TableInput, CELL_PADDING,
+};
 pub use paragraph::{
     CaretStop, Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, StyleSpan, TextStyle,
 };

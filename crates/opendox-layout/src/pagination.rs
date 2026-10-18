@@ -3,8 +3,11 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use crate::fonts::FontId;
-use crate::navigation::PlacedLine;
+use crate::navigation::{PlacedLine, Rect};
 use crate::paragraph::{LayoutEngine, ParagraphLayout, StyleSpan, TextStyle};
+
+/// Space between a cell's border and its text, in points.
+pub const CELL_PADDING: f32 = 5.0;
 
 /// Page size and margins, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,25 +59,51 @@ pub struct ParagraphInput<'a> {
     pub spans: &'a [StyleSpan],
 }
 
-/// A page and the pieces of paragraphs placed on it, top to bottom.
+/// A table as input to pagination: rows of cells, each cell a list of paragraphs. Columns
+/// share the content width equally.
+#[derive(Debug, Clone)]
+pub struct TableInput<'a> {
+    pub rows: Vec<Vec<Vec<ParagraphInput<'a>>>>,
+}
+
+/// One block of the document.
+#[derive(Debug, Clone)]
+pub enum BlockInput<'a> {
+    Paragraph(ParagraphInput<'a>),
+    Table(TableInput<'a>),
+}
+
+/// A page: the pieces of paragraphs placed on it, and the table borders to draw.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
     pub fragments: Vec<Fragment>,
+    pub rules: Vec<Rule>,
 }
 
 /// The lines of one paragraph that landed on one page.
 ///
-/// To place a line on the page: `x = margin_left + glyph.x`,
+/// To place a line on the page: `x = fragment.left + glyph.x`,
 /// `y = fragment.top + (line.top - first_line.top)` where `first_line` is
 /// `paragraph.lines[fragment.lines.start]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fragment {
-    /// Index of the paragraph in the input.
+    /// Paragraph index: body and cell paragraphs numbered together in reading order.
     pub paragraph: usize,
     /// Which of the paragraph's lines are on this page.
     pub lines: Range<usize>,
     /// Y of the fragment's first line top, measured from the top edge of the page.
     pub top: f32,
+    /// X of the paragraph's left edge, measured from the left edge of the page.
+    pub left: f32,
+}
+
+/// A straight line to draw (a table border), in points from the page's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rule {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
 }
 
 /// A glyph positioned on a page: `(x, y)` is its baseline origin in points from the page's
@@ -89,15 +118,26 @@ pub struct PlacedGlyph {
     pub y: f32,
 }
 
+/// What layout needs per block after numbering its paragraphs.
+enum Plan {
+    Paragraph(usize),
+    /// Rows of cells; each cell is a range of paragraph indices.
+    Table(Vec<Vec<Range<usize>>>),
+}
+
 /// Lays out a whole document onto pages, caching paragraph layouts between calls.
 ///
 /// Paragraphs are cached by content (text, styles, width), not by position, so inserting or
 /// deleting a paragraph doesn't invalidate the others. Restacking lines into pages is plain
 /// arithmetic and is redone in full on every call.
+///
+/// Paragraph indices count body paragraphs and table-cell paragraphs together, in reading
+/// order (a table's cells row by row).
 pub struct Paginator {
     geometry: PageGeometry,
     cache: HashMap<u64, ParagraphLayout>,
     keys: Vec<u64>,
+    plan: Vec<Plan>,
     pages: Vec<Page>,
     /// Every line in document order with its page position; navigation walks this.
     pub(crate) lines: Vec<PlacedLine>,
@@ -106,18 +146,13 @@ pub struct Paginator {
     last_shaped: usize,
 }
 
-struct Stacked {
-    pages: Vec<Page>,
-    lines: Vec<PlacedLine>,
-    first_line: Vec<usize>,
-}
-
 impl Paginator {
     pub fn new(geometry: PageGeometry) -> Self {
         Self {
             geometry,
             cache: HashMap::new(),
             keys: Vec::new(),
+            plan: Vec::new(),
             pages: Vec::new(),
             lines: Vec::new(),
             first_line: Vec::new(),
@@ -134,15 +169,55 @@ impl Paginator {
         self.geometry = geometry;
     }
 
-    /// Lays out `paragraphs` and splits them into pages.
+    /// Lays out a document made only of paragraphs.
     pub fn layout(&mut self, engine: &mut LayoutEngine, paragraphs: &[ParagraphInput]) -> &[Page] {
-        let width = self.geometry.content_width();
-        let mut fresh = HashMap::with_capacity(paragraphs.len());
+        let blocks: Vec<BlockInput> = paragraphs
+            .iter()
+            .copied()
+            .map(BlockInput::Paragraph)
+            .collect();
+        self.layout_blocks(engine, &blocks)
+    }
+
+    /// Lays out paragraphs and tables and splits them into pages.
+    pub fn layout_blocks(&mut self, engine: &mut LayoutEngine, blocks: &[BlockInput]) -> &[Page] {
+        let content = self.geometry.content_width();
+        // Number every paragraph in reading order and note the width it's laid out at.
+        let mut inputs: Vec<(ParagraphInput, f32)> = Vec::new();
+        self.plan.clear();
+        for block in blocks {
+            match block {
+                BlockInput::Paragraph(p) => {
+                    inputs.push((*p, content));
+                    self.plan.push(Plan::Paragraph(inputs.len() - 1));
+                }
+                BlockInput::Table(t) => {
+                    let cols = column_count(t);
+                    let width = cell_text_width(content, cols);
+                    let rows = t
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .take(cols)
+                                .map(|cell| {
+                                    let start = inputs.len();
+                                    inputs.extend(cell.iter().map(|p| (*p, width)));
+                                    start..inputs.len()
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    self.plan.push(Plan::Table(rows));
+                }
+            }
+        }
+
+        let mut fresh = HashMap::with_capacity(inputs.len());
         self.keys.clear();
         self.last_shaped = 0;
-
-        for p in paragraphs {
-            let key = cache_key(p, width);
+        for (p, width) in &inputs {
+            let key = cache_key(p, *width);
             self.keys.push(key);
             if fresh.contains_key(&key) {
                 continue;
@@ -151,7 +226,7 @@ impl Paginator {
                 Some(l) => l,
                 None => {
                     self.last_shaped += 1;
-                    engine.layout_paragraph(p.text, p.base, p.spans, width)
+                    engine.layout_paragraph(p.text, p.base, p.spans, *width)
                 }
             };
             fresh.insert(key, layout);
@@ -165,7 +240,7 @@ impl Paginator {
         &self.pages
     }
 
-    /// Pages from the last [`Paginator::layout`] call.
+    /// Pages from the last layout call.
     pub fn pages(&self) -> &[Page] {
         &self.pages
     }
@@ -186,7 +261,6 @@ impl Paginator {
         let Some(page) = self.pages.get(index) else {
             return out;
         };
-        let left = self.geometry.margin_left;
         for f in &page.fragments {
             let Some(para) = self.paragraph(f.paragraph) else {
                 continue;
@@ -202,7 +276,7 @@ impl Paginator {
                         face_index: run.face_index,
                         font_size: run.font_size,
                         id: g.id,
-                        x: left + g.x,
+                        x: f.left + g.x,
                         y: dy + g.y,
                     }));
                 }
@@ -212,69 +286,222 @@ impl Paginator {
     }
 
     fn stack(&self) -> Stacked {
-        let g = &self.geometry;
-        let bottom_limit = g.margin_top + g.content_height();
-        let mut out = Stacked {
-            pages: vec![Page {
-                fragments: Vec::new(),
-            }],
-            lines: Vec::new(),
-            first_line: Vec::with_capacity(self.keys.len()),
+        let g = self.geometry;
+        let mut s = Stacker {
+            out: Stacked {
+                pages: vec![Page {
+                    fragments: Vec::new(),
+                    rules: Vec::new(),
+                }],
+                lines: Vec::new(),
+                first_line: vec![0; self.keys.len()],
+            },
+            y: g.margin_top,
+            g,
         };
-        let mut y = g.margin_top;
-
-        for (index, key) in self.keys.iter().enumerate() {
-            out.first_line.push(out.lines.len());
-            let Some(para) = self.cache.get(key) else {
-                continue;
-            };
-            let mut start = 0;
-            for (i, line) in para.lines.iter().enumerate() {
-                let h = line.bottom - line.top;
-                // Break only if something is already on the page: a line taller than a whole
-                // page is placed on an empty page rather than pushed forward forever.
-                if y + h > bottom_limit && y > g.margin_top {
-                    push_fragment(&mut out.pages, index, start..i, y, para);
-                    out.pages.push(Page {
-                        fragments: Vec::new(),
-                    });
-                    y = g.margin_top;
-                    start = i;
-                }
-                out.lines.push(PlacedLine {
-                    page: out.pages.len() - 1,
-                    paragraph: index,
-                    line: i,
-                    top: y,
-                    bottom: y + h,
-                });
-                y += h;
+        for block in &self.plan {
+            match block {
+                Plan::Paragraph(i) => self.stack_paragraph(&mut s, *i),
+                Plan::Table(rows) => self.stack_table(&mut s, rows),
             }
-            push_fragment(&mut out.pages, index, start..para.lines.len(), y, para);
         }
-        out
+        s.out
+    }
+
+    /// Places a body paragraph line by line, breaking pages between lines.
+    fn stack_paragraph(&self, s: &mut Stacker, index: usize) {
+        s.out.first_line[index] = s.out.lines.len();
+        let Some(para) = self.paragraph(index) else {
+            return;
+        };
+        let left = s.g.margin_left;
+        let width = s.g.content_width();
+        let mut start = 0;
+        for (i, line) in para.lines.iter().enumerate() {
+            let h = line.bottom - line.top;
+            if s.needs_break(h) {
+                s.push_fragment(index, start..i, para, left);
+                s.new_page();
+                start = i;
+            }
+            s.out.lines.push(PlacedLine {
+                page: s.page(),
+                paragraph: index,
+                line: i,
+                top: s.y,
+                bottom: s.y + h,
+                left,
+                width,
+                region: Rect {
+                    x: left,
+                    y: s.y,
+                    width,
+                    height: h,
+                },
+            });
+            s.y += h;
+        }
+        s.push_fragment(index, start..para.lines.len(), para, left);
+    }
+
+    /// Places a table row by row. A row never splits: if it doesn't fit, it moves to the next
+    /// page (unless the page is empty, so a row taller than a page can't loop forever).
+    fn stack_table(&self, s: &mut Stacker, rows: &[Vec<Range<usize>>]) {
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        if cols == 0 {
+            return;
+        }
+        let col_width = s.g.content_width() / cols as f32;
+        let text_width = cell_text_width(s.g.content_width(), cols);
+        for row in rows {
+            let content: f32 = row
+                .iter()
+                .map(|cell| {
+                    cell.clone()
+                        .filter_map(|i| self.paragraph(i))
+                        .map(|p| p.height)
+                        .sum::<f32>()
+                })
+                .fold(0.0, f32::max);
+            let row_h = content + 2.0 * CELL_PADDING;
+            if s.needs_break(row_h) {
+                s.new_page();
+            }
+            let top = s.y;
+            let page = s.page();
+            for (c, cell) in row.iter().enumerate() {
+                let x0 = s.g.margin_left + c as f32 * col_width;
+                let left = x0 + CELL_PADDING;
+                let region = Rect {
+                    x: x0,
+                    y: top,
+                    width: col_width,
+                    height: row_h,
+                };
+                let mut y = top + CELL_PADDING;
+                for index in cell.clone() {
+                    s.out.first_line[index] = s.out.lines.len();
+                    let Some(para) = self.paragraph(index) else {
+                        continue;
+                    };
+                    for (i, line) in para.lines.iter().enumerate() {
+                        let h = line.bottom - line.top;
+                        s.out.lines.push(PlacedLine {
+                            page,
+                            paragraph: index,
+                            line: i,
+                            top: y,
+                            bottom: y + h,
+                            left,
+                            width: text_width,
+                            region,
+                        });
+                        y += h;
+                    }
+                    if let Some(p) = s.out.pages.last_mut() {
+                        p.fragments.push(Fragment {
+                            paragraph: index,
+                            lines: 0..para.lines.len(),
+                            top: y - para.height,
+                            left,
+                        });
+                    }
+                }
+            }
+            // Borders: top and bottom of the row, and every column edge.
+            let (x_start, x_end) = (s.g.margin_left, s.g.margin_left + s.g.content_width());
+            let bottom = top + row_h;
+            if let Some(p) = s.out.pages.last_mut() {
+                p.rules.push(Rule {
+                    x0: x_start,
+                    y0: top,
+                    x1: x_end,
+                    y1: top,
+                });
+                p.rules.push(Rule {
+                    x0: x_start,
+                    y0: bottom,
+                    x1: x_end,
+                    y1: bottom,
+                });
+                for c in 0..=cols {
+                    let x = x_start + c as f32 * col_width;
+                    p.rules.push(Rule {
+                        x0: x,
+                        y0: top,
+                        x1: x,
+                        y1: bottom,
+                    });
+                }
+            }
+            s.y = bottom;
+        }
     }
 }
 
-/// Adds the fragment ending at `bottom` to the last page; its top is derived from line heights.
-fn push_fragment(
-    pages: &mut [Page],
-    paragraph: usize,
-    lines: Range<usize>,
-    bottom: f32,
-    para: &ParagraphLayout,
-) {
-    if lines.is_empty() {
-        return;
+struct Stacked {
+    pages: Vec<Page>,
+    lines: Vec<PlacedLine>,
+    first_line: Vec<usize>,
+}
+
+/// Running state while stacking blocks onto pages.
+struct Stacker {
+    out: Stacked,
+    y: f32,
+    g: PageGeometry,
+}
+
+impl Stacker {
+    fn page(&self) -> usize {
+        self.out.pages.len() - 1
     }
-    let height = para.lines[lines.end - 1].bottom - para.lines[lines.start].top;
-    if let Some(page) = pages.last_mut() {
-        page.fragments.push(Fragment {
-            paragraph,
-            lines,
-            top: bottom - height,
+
+    /// Whether something `h` tall must go on a new page. Only if something is already on this
+    /// page: anything taller than a page goes on an empty page rather than moving on forever.
+    fn needs_break(&self, h: f32) -> bool {
+        self.y + h > self.g.margin_top + self.g.content_height() && self.y > self.g.margin_top
+    }
+
+    fn new_page(&mut self) {
+        self.out.pages.push(Page {
+            fragments: Vec::new(),
+            rules: Vec::new(),
         });
+        self.y = self.g.margin_top;
     }
+
+    /// Adds the fragment of `lines` ending at the current y to the current page.
+    fn push_fragment(
+        &mut self,
+        paragraph: usize,
+        lines: Range<usize>,
+        para: &ParagraphLayout,
+        left: f32,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        let height = para.lines[lines.end - 1].bottom - para.lines[lines.start].top;
+        let top = self.y - height;
+        if let Some(page) = self.out.pages.last_mut() {
+            page.fragments.push(Fragment {
+                paragraph,
+                lines,
+                top,
+                left,
+            });
+        }
+    }
+}
+
+fn column_count(t: &TableInput) -> usize {
+    t.rows.iter().map(Vec::len).max().unwrap_or(0)
+}
+
+/// Width available to a cell's text.
+fn cell_text_width(content: f32, cols: usize) -> f32 {
+    (content / cols.max(1) as f32 - 2.0 * CELL_PADDING).max(1.0)
 }
 
 fn cache_key(p: &ParagraphInput, width: f32) -> u64 {

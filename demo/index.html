@@ -3,15 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>opendox render demo</title>
+    <title>opendox demo</title>
     <style>
       :root {
         --canvas-bg: #e6e8ec;
         --bar-bg: #f7f8fa;
+        --surface: #ffffff;
         --hairline: #c9cdd4;
         --text: #1d2129;
         --text-muted: #4a515c;
+        --accent: #2f5bd3;
+        --accent-soft: rgb(47 91 211 / 0.16);
         --page-shadow: 0 1px 3px rgb(40 48 64 / 0.18);
+        --menu-shadow: 0 4px 16px rgb(40 48 64 / 0.16), 0 0 0 1px var(--hairline);
       }
       * {
         box-sizing: border-box;
@@ -26,12 +30,12 @@
       header {
         position: sticky;
         top: 0;
-        z-index: 1;
+        z-index: 3;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         gap: 8px 20px;
-        padding: 8px 16px;
+        padding: 0 16px;
         background: var(--bar-bg);
         border-bottom: 1px solid var(--hairline);
       }
@@ -56,26 +60,127 @@
         color: var(--text);
         font-weight: 600;
       }
+      .tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+      }
+      button,
+      select {
+        min-height: 44px;
+        font: inherit;
+        color: var(--text);
+      }
+      .tool {
+        padding: 0 12px;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .tool:hover,
+      .tool[aria-expanded="true"] {
+        background: var(--surface);
+        border-color: var(--hairline);
+      }
       label {
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-left: auto;
         color: var(--text-muted);
       }
       select {
-        min-height: 32px;
-        font: inherit;
-        color: var(--text);
-        background: #fff;
+        background: var(--surface);
         border: 1px solid var(--hairline);
         border-radius: 4px;
         padding: 0 6px;
       }
+      button:focus-visible,
       select:focus-visible {
-        outline: 2px solid #2f5bd3;
+        outline: 2px solid var(--accent);
         outline-offset: 1px;
       }
+
+      /* Table size picker, like Insert ▸ Table in Google Docs. */
+      .picker-wrap {
+        position: relative;
+      }
+      #picker {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        padding: 10px;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #picker[hidden] {
+        display: none;
+      }
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(10, 24px);
+        gap: 2px;
+      }
+      #grid button {
+        min-height: 0;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: 2px;
+        cursor: pointer;
+      }
+      #grid button.on {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      #grid button:focus-visible {
+        outline-offset: 0;
+      }
+      #size {
+        margin: 8px 0 0;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Right-click menu inside tables. */
+      #table-menu {
+        position: fixed;
+        z-index: 4;
+        min-width: 200px;
+        margin: 0;
+        padding: 4px;
+        list-style: none;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #table-menu[hidden] {
+        display: none;
+      }
+      #table-menu button {
+        width: 100%;
+        padding: 0 12px;
+        text-align: left;
+        background: transparent;
+        border: 0;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #table-menu button:hover,
+      #table-menu button:focus-visible {
+        background: var(--accent-soft);
+        outline: none;
+      }
+      #table-menu hr {
+        margin: 4px 0;
+        border: 0;
+        border-top: 1px solid var(--hairline);
+      }
+
       #pages {
         display: flex;
         flex-direction: column;
@@ -84,8 +189,6 @@
         padding: 16px;
       }
       .opendox-page {
-        display: block;
-        max-width: none;
         box-shadow: var(--page-shadow);
       }
       #error {
@@ -96,24 +199,45 @@
   </head>
   <body>
     <header>
-      <h1>opendox render demo</h1>
+      <h1>opendox demo</h1>
       <dl id="stats" aria-live="polite">
         <div><dt>Pages</dt><dd id="s-pages">–</dd></div>
-        <div><dt>Glyphs</dt><dd id="s-glyphs">–</dd></div>
         <div><dt>Layout</dt><dd id="s-layout">–</dd></div>
         <div><dt>Render</dt><dd id="s-render">–</dd></div>
+        <div><dt>Cell</dt><dd id="s-cell">–</dd></div>
       </dl>
-      <label>
-        Zoom
-        <select id="zoom">
-          <option value="0.75">75%</option>
-          <option value="1" selected>100%</option>
-          <option value="1.5">150%</option>
-          <option value="2">200%</option>
-        </select>
-      </label>
+      <div class="tools">
+        <div class="picker-wrap">
+          <button id="insert-table" class="tool" aria-haspopup="dialog" aria-expanded="false" aria-controls="picker">
+            Insert table
+          </button>
+          <div id="picker" role="dialog" aria-label="Choose table size" hidden>
+            <div id="grid"></div>
+            <p id="size" aria-live="polite">1 × 1</p>
+          </div>
+        </div>
+        <label>
+          Zoom
+          <select id="zoom">
+            <option value="0.75">75%</option>
+            <option value="1" selected>100%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+          </select>
+        </label>
+      </div>
     </header>
     <main id="pages" aria-label="Document pages"></main>
+    <ul id="table-menu" role="menu" aria-label="Table" hidden>
+      <li role="none"><button role="menuitem" data-cmd="insertRowAbove">Insert row above</button></li>
+      <li role="none"><button role="menuitem" data-cmd="insertRowBelow">Insert row below</button></li>
+      <li role="none"><button role="menuitem" data-cmd="insertColumnLeft">Insert column left</button></li>
+      <li role="none"><button role="menuitem" data-cmd="insertColumnRight">Insert column right</button></li>
+      <li role="separator"><hr /></li>
+      <li role="none"><button role="menuitem" data-cmd="deleteRow">Delete row</button></li>
+      <li role="none"><button role="menuitem" data-cmd="deleteColumn">Delete column</button></li>
+      <li role="none"><button role="menuitem" data-cmd="deleteTable">Delete table</button></li>
+    </ul>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

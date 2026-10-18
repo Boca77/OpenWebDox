@@ -2,7 +2,8 @@ import { PageRenderer, type LayoutSource, type RenderStats } from "./renderer.js
 
 /**
  * Everything the view needs from the engine. The wasm `Editor` implements it. Positions are
- * document char indices (Unicode scalar values, not UTF-16 units).
+ * flat positions: one number per caret position, body text and table cells together in
+ * reading order.
  */
 export interface EditorEngine extends LayoutSource {
   layout(): number;
@@ -10,9 +11,12 @@ export interface EditorEngine extends LayoutSource {
   slice(start: number, end: number): string;
   /** Returns the caret position after the inserted text. */
   insert(pos: number, text: string): number;
-  delete(start: number, end: number): void;
-  prev_boundary(pos: number): number | undefined;
-  next_boundary(pos: number): number | undefined;
+  /** Deletes a range; returns the caret position. */
+  delete(start: number, end: number): number;
+  delete_backward(pos: number): number;
+  delete_forward(pos: number): number;
+  move_left(pos: number): number;
+  move_right(pos: number): number;
   /** `[pos, upstream]` */
   hit_test(page: number, x: number, y: number): Uint32Array | undefined;
   /** `[page, x, top, bottom]` in points */
@@ -22,12 +26,39 @@ export interface EditorEngine extends LayoutSource {
   line_end(pos: number, upstream: boolean): Uint32Array | undefined;
   /** Groups of `page, x, y, width, height` in points */
   selection_rects(a: number, b: number): Float32Array;
+  insert_table(pos: number, rows: number, cols: number): number;
+  /** `[row, col, rows, cols]` */
+  table_info(pos: number): Uint32Array | undefined;
+  next_cell(pos: number): number | undefined;
+  prev_cell(pos: number): number | undefined;
+  table_insert_row(pos: number, below: boolean): number;
+  table_insert_column(pos: number, right: boolean): number;
+  table_delete_row(pos: number): number;
+  table_delete_column(pos: number): number;
+  table_delete(pos: number): number;
 }
 
 export interface EditStats {
   layoutMs: number;
   render: RenderStats;
 }
+
+/** Where the caret is in a table. */
+export interface TableInfo {
+  row: number;
+  col: number;
+  rows: number;
+  cols: number;
+}
+
+export type TableCommand =
+  | "insertRowAbove"
+  | "insertRowBelow"
+  | "insertColumnLeft"
+  | "insertColumnRight"
+  | "deleteRow"
+  | "deleteColumn"
+  | "deleteTable";
 
 const RECT_STRIDE = 5;
 
@@ -66,6 +97,8 @@ export class EditorView {
   readonly renderer: PageRenderer;
   /** Called after every edit with timings. */
   onUpdate?: (stats: EditStats) => void;
+  /** Called whenever the caret or selection moves. */
+  onSelectionChange?: () => void;
 
   private readonly input: HTMLTextAreaElement;
   private anchor = 0;
@@ -101,6 +134,7 @@ export class EditorView {
     container.addEventListener("pointermove", (e) => this.onPointerMove(e));
     container.addEventListener("pointerup", () => (this.dragging = false));
     container.addEventListener("pointercancel", () => (this.dragging = false));
+    container.addEventListener("contextmenu", (e) => this.onContextMenu(e));
     this.input.addEventListener("keydown", (e) => this.onKeyDown(e));
     this.input.addEventListener("input", () => this.onInput());
     this.input.addEventListener("compositionstart", () => this.onCompositionStart());
@@ -114,7 +148,7 @@ export class EditorView {
     this.relayout();
   }
 
-  /** Current selection as char indices; `anchor === focus` when it's just a caret. */
+  /** Current selection; `anchor === focus` when it's just a caret. */
   get selection(): { anchor: number; focus: number } {
     return { anchor: this.anchor, focus: this.focus };
   }
@@ -135,6 +169,38 @@ export class EditorView {
     const at = this.deleteSelectionRaw();
     const after = this.engine.insert(at, clean);
     this.collapseTo(after, false);
+    this.relayout();
+  }
+
+  /** Inserts a table at the caret and puts the caret in its first cell. */
+  insertTable(rows: number, cols: number): void {
+    const at = this.deleteSelectionRaw();
+    const cell = this.engine.insert_table(at, rows, cols);
+    this.collapseTo(cell, false);
+    this.relayout();
+  }
+
+  /** Where the caret is in a table, or `undefined` outside tables. */
+  tableInfo(): TableInfo | undefined {
+    const t = this.engine.table_info(this.focus);
+    return t ? { row: t[0], col: t[1], rows: t[2], cols: t[3] } : undefined;
+  }
+
+  /** Runs a table command for the table holding the caret. */
+  tableCommand(command: TableCommand): void {
+    if (!this.tableInfo()) return;
+    const e = this.engine;
+    const at = this.focus;
+    const to = {
+      insertRowAbove: () => e.table_insert_row(at, false),
+      insertRowBelow: () => e.table_insert_row(at, true),
+      insertColumnLeft: () => e.table_insert_column(at, false),
+      insertColumnRight: () => e.table_insert_column(at, true),
+      deleteRow: () => e.table_delete_row(at),
+      deleteColumn: () => e.table_delete_column(at),
+      deleteTable: () => e.table_delete(at),
+    }[command]();
+    this.collapseTo(to, false);
     this.relayout();
   }
 
@@ -170,6 +236,17 @@ export class EditorView {
     if (!this.dragging) return;
     const hit = this.hitAt(e.clientX, e.clientY);
     if (hit) this.setCaret(hit[0], hit[1] === 1, true);
+  }
+
+  /** A right-click outside the selection moves the caret there first, like a left-click. */
+  private onContextMenu(e: MouseEvent): void {
+    const hit = this.hitAt(e.clientX, e.clientY);
+    if (!hit) return;
+    const [lo, hi] = this.range();
+    if (lo === hi || hit[0] < lo || hit[0] > hi) {
+      this.setCaret(hit[0], hit[1] === 1, false);
+    }
+    this.focusEditor();
   }
 
   /** Hit-tests the page nearest to a client point (pages stack vertically). */
@@ -225,6 +302,11 @@ export class EditorView {
       case "Enter":
         this.insertText("\n");
         break;
+      case "Tab":
+        // Outside tables Tab keeps its default job of moving focus out of the editor.
+        if (mod || !this.tableInfo()) return;
+        this.tabToCell(!e.shiftKey);
+        break;
       case "a":
       case "A":
         if (!mod) return;
@@ -247,10 +329,8 @@ export class EditorView {
       this.drawSelection();
       return;
     }
-    const to = forward
-      ? this.engine.next_boundary(this.focus)
-      : this.engine.prev_boundary(this.focus);
-    this.setCaret(to ?? this.focus, false, extend);
+    const to = forward ? this.engine.move_right(this.focus) : this.engine.move_left(this.focus);
+    this.setCaret(to, false, extend);
   }
 
   private moveVertical(down: boolean, extend: boolean): void {
@@ -278,23 +358,34 @@ export class EditorView {
     if (to) this.setCaret(to[0], to[1] === 1, extend);
   }
 
-  private deleteBackward(): void {
-    if (this.anchor === this.focus) {
-      const from = this.engine.prev_boundary(this.focus);
-      if (from === undefined) return;
-      this.anchor = from;
+  /** Tab / Shift+Tab between cells; Tab in the last cell adds a row, as in Google Docs. */
+  private tabToCell(forward: boolean): void {
+    this.goalX = null;
+    let to = forward ? this.engine.next_cell(this.focus) : this.engine.prev_cell(this.focus);
+    if (to === undefined && forward) {
+      this.engine.table_insert_row(this.focus, true);
+      this.engine.layout();
+      to = this.engine.next_cell(this.focus);
     }
-    this.deleteSelectionRaw();
+    if (to !== undefined) this.collapseTo(to, false);
+    this.relayout();
+  }
+
+  private deleteBackward(): void {
+    const pos =
+      this.anchor !== this.focus
+        ? this.deleteSelectionRaw()
+        : this.engine.delete_backward(this.focus);
+    this.collapseTo(pos, false);
     this.relayout();
   }
 
   private deleteForward(): void {
-    if (this.anchor === this.focus) {
-      const to = this.engine.next_boundary(this.focus);
-      if (to === undefined) return;
-      this.anchor = to;
-    }
-    this.deleteSelectionRaw();
+    const pos =
+      this.anchor !== this.focus
+        ? this.deleteSelectionRaw()
+        : this.engine.delete_forward(this.focus);
+    this.collapseTo(pos, false);
     this.relayout();
   }
 
@@ -355,9 +446,9 @@ export class EditorView {
   /** Deletes the selection without relayout; returns where the caret ends up. */
   private deleteSelectionRaw(): number {
     const [lo, hi] = this.range();
-    if (lo !== hi) this.engine.delete(lo, hi);
-    this.collapseTo(lo, false);
-    return lo;
+    const at = lo === hi ? lo : this.engine.delete(lo, hi);
+    this.collapseTo(at, false);
+    return at;
   }
 
   private collapseTo(pos: number, upstream: boolean): void {
@@ -387,6 +478,7 @@ export class EditorView {
         this.renderer.overlay(rects[i])?.append(box);
       }
     }
+    this.onSelectionChange?.();
 
     const caret = this.engine.caret_rect(this.focus, this.upstream);
     if (!caret) return;

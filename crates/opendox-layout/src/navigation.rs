@@ -1,18 +1,58 @@
 //! Turning page coordinates into text positions and back: clicks, carets, arrow keys and
 //! selection highlights.
 
-use crate::pagination::Paginator;
+use std::cmp::Ordering;
+
+use crate::pagination::{Paginator, CELL_PADDING};
 use crate::paragraph::Line;
+
+/// A rectangle in points from the page's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn dx(&self, x: f32) -> f32 {
+        (self.x - x).max(x - (self.x + self.width)).max(0.0)
+    }
+
+    fn dy(&self, y: f32) -> f32 {
+        (self.y - y).max(y - (self.y + self.height)).max(0.0)
+    }
+}
 
 /// A line as placed on a page. Coordinates are points from the page's top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlacedLine {
     pub page: usize,
+    /// Paragraph index (body and cell paragraphs together, in reading order).
     pub paragraph: usize,
     /// Index of the line within its paragraph.
     pub line: usize,
     pub top: f32,
     pub bottom: f32,
+    /// X where the paragraph's text starts.
+    pub left: f32,
+    /// Width available to the text.
+    pub width: f32,
+    /// Area a click selects this line from: the line itself for body text, the whole cell for
+    /// text in a table.
+    pub region: Rect,
+}
+
+impl PlacedLine {
+    fn rect(&self) -> Rect {
+        Rect {
+            x: self.left,
+            y: self.top,
+            width: self.width,
+            height: self.bottom - self.top,
+        }
+    }
 }
 
 /// A caret position in the document.
@@ -50,6 +90,8 @@ pub struct SelectionRect {
 /// Width shown for a selected paragraph break, so selecting across paragraphs is visible.
 const PARAGRAPH_BREAK_WIDTH: f32 = 4.0;
 
+const EPSILON: f32 = 0.01;
+
 impl Paginator {
     /// Every line in document order with its page position.
     pub fn placed_lines(&self) -> &[PlacedLine] {
@@ -57,29 +99,32 @@ impl Paginator {
     }
 
     /// The text position nearest to point `(x, y)` on `page`, or `None` if the page is empty or
-    /// doesn't exist. Points in the margins snap to the nearest line and line end.
+    /// doesn't exist. Points in the margins snap to the nearest line and line end; points
+    /// anywhere in a table cell go to that cell.
     pub fn hit_test(&self, page: usize, x: f32, y: f32) -> Option<TextPosition> {
-        let on_page = self.lines.iter().filter(|l| l.page == page);
-        let mut chosen = None;
-        for placed in on_page {
-            chosen = Some(placed);
-            if y < placed.bottom {
-                break;
-            }
-        }
-        let placed = chosen?;
+        let on_page = || self.lines.iter().filter(move |l| l.page == page);
+        let in_region = on_page().filter(|l| l.region.dx(x) == 0.0 && l.region.dy(y) == 0.0);
+        let placed = in_region
+            .min_by(|a, b| a.rect().dy(y).total_cmp(&b.rect().dy(y)))
+            .or_else(|| {
+                on_page().min_by(|a, b| {
+                    let (ra, rb) = (a.rect(), b.rect());
+                    ra.dy(y)
+                        .total_cmp(&rb.dy(y))
+                        .then(a.region.dx(x).total_cmp(&b.region.dx(x)))
+                })
+            })?;
         let line = self.line(placed)?;
-        Some(self.position_on(placed, line, x - self.geometry().margin_left))
+        Some(self.position_on(placed, line, x))
     }
 
     /// Where to draw the caret for `pos`.
     pub fn caret_rect(&self, pos: TextPosition) -> Option<CaretRect> {
-        let index = self.line_index(pos)?;
-        let placed = &self.lines[index];
+        let placed = &self.lines[self.line_index(pos)?];
         let line = self.line(placed)?;
         Some(CaretRect {
             page: placed.page,
-            x: self.geometry().margin_left + line.caret_x(pos.byte),
+            x: placed.left + line.caret_x(pos.byte),
             top: placed.top,
             bottom: placed.bottom,
         })
@@ -87,21 +132,50 @@ impl Paginator {
 
     /// The position one line up or down from `pos`, as close as possible to `goal_x` (points
     /// from the page's left edge). `None` at the first or last line of the document.
+    ///
+    /// Lines in the same column are preferred, so moving through a table stays in a column and
+    /// moving out of one lands under the caret.
     pub fn move_vertical(
         &self,
         pos: TextPosition,
         goal_x: f32,
         down: bool,
     ) -> Option<TextPosition> {
-        let index = self.line_index(pos)?;
-        let target = if down {
-            index.checked_add(1)?
-        } else {
-            index.checked_sub(1)?
+        let cur = &self.lines[self.line_index(pos)?];
+        let beyond = |l: &&PlacedLine| {
+            if down {
+                l.page > cur.page || (l.page == cur.page && l.top >= cur.bottom - EPSILON)
+            } else {
+                l.page < cur.page || (l.page == cur.page && l.bottom <= cur.top + EPSILON)
+            }
         };
-        let placed = self.lines.get(target)?;
-        let line = self.line(placed)?;
-        Some(self.position_on(placed, line, goal_x - self.geometry().margin_left))
+        // Nearest first: the next line down has the smallest (page, top); the next line up has
+        // the largest (page, bottom).
+        let nearer = |a: &&PlacedLine, b: &&PlacedLine| -> Ordering {
+            if down {
+                (a.page, a.top)
+                    .partial_cmp(&(b.page, b.top))
+                    .unwrap_or(Ordering::Equal)
+            } else {
+                (b.page, b.bottom)
+                    .partial_cmp(&(a.page, a.bottom))
+                    .unwrap_or(Ordering::Equal)
+            }
+        };
+        let in_column = |l: &&PlacedLine| l.region.dx(goal_x) == 0.0;
+        let target = self
+            .lines
+            .iter()
+            .filter(beyond)
+            .filter(in_column)
+            .min_by(nearer)
+            .or_else(|| {
+                self.lines.iter().filter(beyond).min_by(|a, b| {
+                    nearer(a, b).then(a.region.dx(goal_x).total_cmp(&b.region.dx(goal_x)))
+                })
+            })?;
+        let line = self.line(target)?;
+        Some(self.position_on(target, line, goal_x))
     }
 
     /// Start of the visual line containing `pos` (Home).
@@ -150,7 +224,6 @@ impl Paginator {
         let (Some(first), Some(last)) = (first, last) else {
             return out;
         };
-        let left = self.geometry().margin_left;
         for placed in &self.lines[first..=last] {
             let Some(line) = self.line(placed) else {
                 continue;
@@ -169,12 +242,12 @@ impl Paginator {
             let mut width = (x1 - x0).abs();
             // The selection continues past this paragraph's end: show the break as selected.
             if self.is_last_line(placed) && placed.paragraph < end.paragraph {
-                width += PARAGRAPH_BREAK_WIDTH;
+                width += PARAGRAPH_BREAK_WIDTH.min(CELL_PADDING);
             }
             if width > 0.0 {
                 out.push(SelectionRect {
                     page: placed.page,
-                    x: left + x0.min(x1),
+                    x: placed.left + x0.min(x1),
                     y: placed.top,
                     width,
                     height: placed.bottom - placed.top,
@@ -213,8 +286,9 @@ impl Paginator {
         Some(first + line)
     }
 
+    /// The caret position on `line` nearest to page x coordinate `x`.
     fn position_on(&self, placed: &PlacedLine, line: &Line, x: f32) -> TextPosition {
-        let byte = line.offset_at(x);
+        let byte = line.offset_at(x - placed.left);
         TextPosition {
             paragraph: placed.paragraph,
             byte,

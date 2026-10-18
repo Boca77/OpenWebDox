@@ -139,6 +139,85 @@ const lenBefore = await ev("window.opendox.editor.len()");
 await key("Backspace");
 check("backspace removes whole emoji", lenBefore - (await ev("window.opendox.editor.len()")) === 5);
 
+// --- tables --------------------------------------------------------------------------------
+await ev(`window.opendox.cellPos = (r, c, nth = 0) => { const e = window.opendox.editor; let seen = -1, last = null;
+  for (let p = 0; p <= e.len(); p++) { const t = e.table_info(p); if (!t) { last = null; continue; }
+    const id = t[2] + 'x' + t[3]; if (last === null) seen++; last = id;
+    if (seen === nth && t[0] === r && t[1] === c) return p; } return -1; }`);
+const cellPos = (r, c, nth = 0) => ev(`window.opendox.cellPos(${r}, ${c}, ${nth})`);
+const info = () => ev("(() => { const t = window.opendox.view.tableInfo(); return t ? [t.row, t.col, t.rows, t.cols] : null; })()");
+async function click(x, y, button = "left") {
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons: button === "left" ? 1 : 2, clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: 1 });
+}
+const rectOf = (sel) => ev(`(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+
+// 11. Click into the sample table's second cell and type.
+const sample01 = await cellPos(0, 1);
+check("sample table present", sample01 > 0, String(sample01));
+[x, y] = await clientOf(sample01);
+await click(x + 2, y);
+check("click lands in clicked cell", JSON.stringify((await info())?.slice(0, 2)) === "[0,1]", JSON.stringify(await info()));
+await key("End");
+await send("Input.insertText", { text: "!" });
+check("typing goes into the cell", (await ev(`window.opendox.editor.slice(${sample01}, ${sample01} + 11)`)) === "First seen!");
+
+// 12. Tab / Shift+Tab move between cells; Arrow Down moves to the cell below.
+await key("Tab");
+check("Tab moves to next cell", JSON.stringify((await info())?.slice(0, 2)) === "[0,2]", JSON.stringify(await info()));
+await key("Tab", 8);
+check("Shift+Tab moves back", JSON.stringify((await info())?.slice(0, 2)) === "[0,1]", JSON.stringify(await info()));
+await key("ArrowDown");
+check("Arrow Down goes to the cell below", JSON.stringify((await info())?.slice(0, 2)) === "[1,1]", JSON.stringify(await info()));
+
+// 13. Backspace at the start of a cell changes nothing.
+const before = await text();
+await key("Home");
+await key("Backspace");
+check("Backspace at cell start is a no-op", (await text()) === before);
+
+// 14. Tab in the last cell adds a row.
+const last = await cellPos(2, 2);
+[x, y] = await clientOf(last);
+await click(x + 2, y);
+await key("End");
+await key("Tab");
+check("Tab in last cell adds a row", JSON.stringify(await info()) === "[3,0,4,3]", JSON.stringify(await info()));
+
+// 15. Insert table from the toolbar grid.
+[x, y] = await clientOf(0);
+await click(x, y);
+await click(...(await rectOf("#insert-table")));
+check("picker opens", !(await ev("document.getElementById('picker').hidden")));
+const [gx, gy] = await rectOf('#grid button[data-r="2"][data-c="3"]');
+await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: gx, y: gy });
+check("picker shows hovered size", (await ev("document.getElementById('size').textContent")) === "2 × 3");
+await click(gx, gy);
+check("toolbar inserts a 2 × 3 table, caret in first cell", JSON.stringify(await info()) === "[0,0,2,3]", JSON.stringify(await info()));
+check("picker closed", await ev("document.getElementById('picker').hidden"));
+check("editor focused after insert", await ev("document.activeElement?.className === 'opendox-input'"));
+await send("Input.insertText", { text: "new" });
+check("type into new table", (await ev(`(() => { const e = window.opendox.editor; const p = window.opendox.view.selection.focus; return e.slice(p - 3, p); })()`)) === "new");
+
+// 16. Right-click menu: insert column right, delete row, delete table.
+[x, y] = await clientOf(await ev("window.opendox.view.selection.focus"));
+await click(x, y, "right");
+check("right-click in table opens menu", !(await ev("document.getElementById('table-menu').hidden")));
+await click(...(await rectOf('#table-menu [data-cmd="insertColumnRight"]')));
+check("insert column right", JSON.stringify(await info()) === "[0,1,2,4]", JSON.stringify(await info()));
+[x, y] = await clientOf(await ev("window.opendox.view.selection.focus"));
+await click(x, y, "right");
+await click(...(await rectOf('#table-menu [data-cmd="deleteRow"]')));
+check("delete row", JSON.stringify(await info()) === "[0,1,1,4]", JSON.stringify(await info()));
+[x, y] = await clientOf(await ev("window.opendox.view.selection.focus"));
+await click(x, y, "right");
+await click(...(await rectOf('#table-menu [data-cmd="deleteTable"]')));
+check("delete table", (await info()) === null, JSON.stringify(await info()));
+check("menu closed", await ev("document.getElementById('table-menu').hidden"));
+[x, y] = await clientOf(5);
+await click(x, y, "right");
+check("no table menu outside tables", await ev("document.getElementById('table-menu').hidden"));
+
 // 10. Typing latency on a 3-page document.
 const t = await ev(`(async () => { const v = window.opendox.view; const times = [];
   for (let i = 0; i < 20; i++) { const t0 = performance.now(); v.insertText('a'); times.push(performance.now() - t0); }

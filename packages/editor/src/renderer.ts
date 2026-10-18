@@ -11,10 +11,20 @@ export interface LayoutSource {
   /** SVG path in font units, y down. `undefined` if the glyph is unknown. */
   glyph_path(font: number, face: number, glyph: number): string | undefined;
   units_per_em(font: number, face: number): number;
+  /** Table borders on a page, in groups of {@link RULE_STRIDE}. */
+  page_rules(index: number): Float32Array;
 }
 
 /** Floats per glyph: font id, face index, glyph id, x, y, font size (positions in points). */
 export const GLYPH_STRIDE = 6;
+
+/** Floats per border line: x0, y0, x1, y1 in points. */
+export const RULE_STRIDE = 4;
+
+/** Table border thickness in points (1px at 100% zoom). */
+const RULE_WIDTH_PT = 0.75;
+
+const INK = "#1d2129";
 
 /** CSS pixels per point: CSS defines 1in = 96px = 72pt. */
 const PX_PER_PT = 96 / 72;
@@ -102,7 +112,8 @@ export class PageRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, widthPx, heightPx);
-    ctx.fillStyle = "#1d2129";
+    this.drawRules(ctx, index, devicePerPt);
+    ctx.fillStyle = INK;
 
     const data = this.source.page_glyphs(index);
     for (let i = 0; i < data.length; i += GLYPH_STRIDE) {
@@ -116,6 +127,22 @@ export class PageRenderer {
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     return data.length / GLYPH_STRIDE;
+  }
+
+  /** Table borders, snapped to whole device pixels so thin lines stay crisp. */
+  private drawRules(ctx: CanvasRenderingContext2D, index: number, devicePerPt: number): void {
+    const rules = this.source.page_rules(index);
+    if (rules.length === 0) return;
+    const width = Math.max(1, Math.round(RULE_WIDTH_PT * devicePerPt));
+    const snap = (v: number) => Math.round(v * devicePerPt) + (width % 2) / 2;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (let i = 0; i < rules.length; i += RULE_STRIDE) {
+      ctx.moveTo(snap(rules[i]), snap(rules[i + 1]));
+      ctx.lineTo(snap(rules[i + 2]), snap(rules[i + 3]));
+    }
+    ctx.stroke();
   }
 
   private path(font: number, face: number, glyph: number): Path2D | null {

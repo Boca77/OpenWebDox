@@ -12,6 +12,15 @@ pub enum ModelError {
     #[error("anchor no longer resolves to a position in this document")]
     AnchorLost,
 
+    #[error("no such table")]
+    NoSuchTable,
+
+    #[error("no such table cell")]
+    NoSuchCell,
+
+    #[error("a table needs at least one row and one column")]
+    InvalidTable,
+
     #[error("could not decode update: {0}")]
     Import(String),
 
