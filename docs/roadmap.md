@@ -47,8 +47,10 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
 - Model: tables (D9), outline with flat positions, table row/column/table commands, editing rules
   across cells and tables. Property test: 3 replicas, concurrent table/row/column/cell edits
   converge and every table stays rectangular.
-- Layout: equal-width columns, 5pt cell padding, rows never split across pages, borders, hit
-  testing by cell, Up/Down stay in the caret's column.
+- Layout: equal-width columns, 5pt cell padding, borders, hit testing by cell, Up/Down stay in
+  the caret's column. Rows that don't fit split across pages at line boundaries (Google Docs
+  default): the piece on the first page reaches the bottom margin, the rest continues at the top
+  of the next page with its own borders. A row with no line that fits moves to the next page.
 - Editor: Insert table grid picker (10 × 10), right-click menu (insert row above/below, column
   left/right, delete row/column/table), Tab / Shift+Tab, Tab in last cell adds a row.
 - `npm run e2e` covers clicking/typing in cells, Tab, Arrow Down, the picker and the menu.
@@ -76,8 +78,9 @@ OS input method. `npm run e2e` covers clicks, drags, keys, typing, IME and emoji
   visible pages.
 - The editor injects its own stylesheet; apps can't theme the caret/selection yet.
 - Table gaps: no column resizing (always equal widths), no merged cells, no nested tables, no
-  header-row repeat, a row taller than a page overflows instead of splitting, no cell-rectangle
-  selection (selection inside a table is linear, row by row), no cell background/border styles.
+  header-row repeat, no "keep row together" option (rows always split when they don't fit), no
+  cell-rectangle selection (selection inside a table is linear, row by row), no cell
+  background/border styles.
 - Outline and `Document::text` rebuild from the whole document on every keystroke (O(n)). Cheap (arithmetic only), but could stop early
   once page breaks match the previous pass.
 

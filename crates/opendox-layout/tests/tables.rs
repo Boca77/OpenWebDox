@@ -218,6 +218,105 @@ fn rows_move_whole_to_the_next_page() {
 }
 
 #[test]
+fn a_row_taller_than_the_page_splits_across_pages() {
+    // The reported case: a short paragraph, then one row whose second cell holds far more
+    // than a page of text. The row must start on page 1 and continue on page 2, never
+    // crossing the bottom margin.
+    let s = style();
+    let tall: Vec<String> = (0..60)
+        .map(|i| format!("Paragraph {i} in a tall cell"))
+        .collect();
+    let blocks = [
+        BlockInput::Paragraph(para("nesto", &s)),
+        BlockInput::Table(TableInput {
+            rows: vec![vec![
+                vec![para("short", &s)],
+                tall.iter().map(|t| para(t, &s)).collect(),
+            ]],
+        }),
+    ];
+    let mut p = Paginator::new(PageGeometry::letter());
+    let pages = p.layout_blocks(&mut engine(), &blocks).to_vec();
+    assert_eq!(pages.len(), 2);
+    let bottom = MARGIN + 648.0;
+    let lines = p.placed_lines();
+
+    // The table starts right under "nesto" on page 1.
+    let first_cell = lines.iter().find(|l| l.paragraph == 1).unwrap();
+    assert_eq!(first_cell.page, 0);
+    assert!(approx(first_cell.region.y, MARGIN + LINE_H));
+
+    // Nothing below the bottom margin, on either page; borders included.
+    for l in lines {
+        assert!(l.bottom <= bottom + 0.01, "{l:?}");
+        assert!(l.region.y + l.region.height <= bottom + 0.01, "{l:?}");
+    }
+    for page in &pages {
+        assert!(!page.rules.is_empty());
+        assert!(page.rules.iter().all(|r| r.y0.max(r.y1) <= bottom + 0.01));
+    }
+    // Like Google Docs, the piece that continues reaches exactly to the bottom margin.
+    let lowest = pages[0]
+        .rules
+        .iter()
+        .map(|r| r.y0.max(r.y1))
+        .fold(0.0, f32::max);
+    assert!(approx(lowest, bottom), "{lowest}");
+
+    // Every line of the tall cell is placed once, in order, and it continues at the top of
+    // page 2.
+    let tall_lines: Vec<_> = lines.iter().filter(|l| l.paragraph >= 2).collect();
+    assert_eq!(tall_lines.len(), 60);
+    let order: Vec<usize> = tall_lines.iter().map(|l| l.paragraph).collect();
+    assert_eq!(order, (2..62).collect::<Vec<_>>());
+    let first_on_page_2 = tall_lines.iter().find(|l| l.page == 1).unwrap();
+    assert!(approx(first_on_page_2.region.y, MARGIN));
+    assert!(
+        tall_lines.iter().filter(|l| l.page == 0).count() > 30,
+        "page 1 is used, not skipped"
+    );
+
+    // Arrow Down crosses the page break inside the cell.
+    let last_on_page_1 = tall_lines.iter().rev().find(|l| l.page == 0).unwrap();
+    let from = pos(last_on_page_1.paragraph, 0);
+    let to = p
+        .move_vertical(from, last_on_page_1.left + 1.0, true)
+        .unwrap();
+    assert_eq!(to.paragraph, first_on_page_2.paragraph);
+
+    // Glyphs on page 2 are inside the page margins.
+    for g in p.placed_glyphs(1) {
+        assert!(g.y > MARGIN && g.y <= bottom, "{g:?}");
+    }
+}
+
+#[test]
+fn a_long_paragraph_inside_one_cell_splits_between_its_lines() {
+    let s = style();
+    let long = "word ".repeat(1500); // one paragraph, many wrapped lines
+    let blocks = [BlockInput::Table(TableInput {
+        rows: vec![vec![vec![para(&long, &s)]]],
+    })];
+    let mut p = Paginator::new(PageGeometry::letter());
+    let pages = p.layout_blocks(&mut engine(), &blocks).to_vec();
+    assert!(pages.len() >= 2);
+    let n = p.paragraph(0).unwrap().lines.len();
+    let placed: Vec<usize> = p.placed_lines().iter().map(|l| l.line).collect();
+    assert_eq!(placed, (0..n).collect::<Vec<_>>());
+    // One fragment per page for the paragraph, covering consecutive line ranges.
+    let ranges: Vec<_> = pages
+        .iter()
+        .flat_map(|pg| pg.fragments.iter().map(|f| f.lines.clone()))
+        .collect();
+    assert_eq!(ranges.len(), pages.len());
+    assert_eq!(ranges.first().unwrap().start, 0);
+    assert_eq!(ranges.last().unwrap().end, n);
+    for w in ranges.windows(2) {
+        assert_eq!(w[0].end, w[1].start);
+    }
+}
+
+#[test]
 fn editing_a_cell_reshapes_only_that_cell() {
     let s = style();
     let mut eng = engine();

@@ -344,8 +344,13 @@ impl Paginator {
         s.push_fragment(index, start..para.lines.len(), para, left);
     }
 
-    /// Places a table row by row. A row never splits: if it doesn't fit, it moves to the next
-    /// page (unless the page is empty, so a row taller than a page can't loop forever).
+    /// Places a table row by row.
+    ///
+    /// A row that doesn't fit is split across pages at line boundaries, as in Google Docs: each
+    /// cell fills the rest of the page and continues on the next, and the table's borders are
+    /// drawn around each page's piece. A row with no line that fits in the remaining space moves
+    /// to the next page whole. Nothing is placed below the bottom margin, except a single line
+    /// taller than a whole page, which gets a page of its own.
     fn stack_table(&self, s: &mut Stacker, rows: &[Vec<Range<usize>>]) {
         let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
         if cols == 0 {
@@ -353,43 +358,86 @@ impl Paginator {
         }
         let col_width = s.g.content_width() / cols as f32;
         let text_width = cell_text_width(s.g.content_width(), cols);
+        let limit = s.g.margin_top + s.g.content_height();
+
         for row in rows {
-            let content: f32 = row
+            // Each cell's lines in reading order: (paragraph, line, height).
+            let cells: Vec<Vec<(usize, usize, f32)>> = row
                 .iter()
                 .map(|cell| {
                     cell.clone()
-                        .filter_map(|i| self.paragraph(i))
-                        .map(|p| p.height)
-                        .sum::<f32>()
+                        .filter_map(|i| self.paragraph(i).map(|p| (i, p)))
+                        .flat_map(|(i, p)| {
+                            p.lines
+                                .iter()
+                                .enumerate()
+                                .map(move |(n, l)| (i, n, l.bottom - l.top))
+                        })
+                        .collect()
                 })
-                .fold(0.0, f32::max);
-            let row_h = content + 2.0 * CELL_PADDING;
-            if s.needs_break(row_h) {
-                s.new_page();
-            }
-            let top = s.y;
-            let page = s.page();
-            for (c, cell) in row.iter().enumerate() {
-                let x0 = s.g.margin_left + c as f32 * col_width;
-                let left = x0 + CELL_PADDING;
-                let region = Rect {
-                    x: x0,
-                    y: top,
-                    width: col_width,
-                    height: row_h,
+                .collect();
+            let mut next = vec![0usize; cells.len()];
+
+            while cells.iter().zip(&next).any(|(c, &n)| n < c.len()) {
+                let room = limit - s.y - 2.0 * CELL_PADDING;
+                let mut take: Vec<usize> = cells
+                    .iter()
+                    .zip(&next)
+                    .map(|(c, &n)| lines_that_fit(&c[n..], room))
+                    .collect();
+                let progress = take.iter().any(|&k| k > 0);
+                if !progress && s.y > s.g.margin_top {
+                    s.new_page();
+                    continue;
+                }
+                if !progress {
+                    // A line taller than an empty page: place it anyway rather than loop.
+                    for (k, (c, &n)) in take.iter_mut().zip(cells.iter().zip(&next)) {
+                        *k = usize::from(n < c.len());
+                    }
+                }
+
+                let top = s.y;
+                let page = s.page();
+                let content = cells
+                    .iter()
+                    .zip(&next)
+                    .zip(&take)
+                    .map(|((c, &n), &k)| c[n..n + k].iter().map(|l| l.2).sum::<f32>())
+                    .fold(0.0, f32::max);
+                let continues = cells
+                    .iter()
+                    .zip(&next)
+                    .zip(&take)
+                    .any(|((c, &n), &k)| n + k < c.len());
+                // A piece that continues on the next page reaches down to the bottom margin,
+                // as in Google Docs, so the table visibly runs off the page.
+                let height = if continues {
+                    (limit - top).max(content + 2.0 * CELL_PADDING)
+                } else {
+                    content + 2.0 * CELL_PADDING
                 };
-                let mut y = top + CELL_PADDING;
-                for index in cell.clone() {
-                    s.out.first_line[index] = s.out.lines.len();
-                    let Some(para) = self.paragraph(index) else {
-                        continue;
+
+                for (col, ((c, n), &k)) in cells.iter().zip(next.iter_mut()).zip(&take).enumerate()
+                {
+                    let x0 = s.g.margin_left + col as f32 * col_width;
+                    let left = x0 + CELL_PADDING;
+                    let region = Rect {
+                        x: x0,
+                        y: top,
+                        width: col_width,
+                        height,
                     };
-                    for (i, line) in para.lines.iter().enumerate() {
-                        let h = line.bottom - line.top;
+                    let mut y = top + CELL_PADDING;
+                    let placed = &c[*n..*n + k];
+                    for &(index, line, h) in placed {
+                        if line == 0 {
+                            s.out.first_line[index] = s.out.lines.len();
+                        }
                         s.out.lines.push(PlacedLine {
                             page,
                             paragraph: index,
-                            line: i,
+                            line,
                             top: y,
                             bottom: y + h,
                             left,
@@ -398,45 +446,43 @@ impl Paginator {
                         });
                         y += h;
                     }
-                    if let Some(p) = s.out.pages.last_mut() {
-                        p.fragments.push(Fragment {
-                            paragraph: index,
-                            lines: 0..para.lines.len(),
-                            top: y - para.height,
-                            left,
-                        });
+                    // One fragment per paragraph piece on this page.
+                    let mut fy = top + CELL_PADDING;
+                    for piece in placed.chunk_by(|a, b| a.0 == b.0) {
+                        let (index, first, _) = piece[0];
+                        if let Some(p) = s.out.pages.last_mut() {
+                            p.fragments.push(Fragment {
+                                paragraph: index,
+                                lines: first..first + piece.len(),
+                                top: fy,
+                                left,
+                            });
+                        }
+                        fy += piece.iter().map(|l| l.2).sum::<f32>();
                     }
+                    *n += k;
+                }
+
+                s.push_borders(top, top + height, cols, col_width);
+                s.y = top + height;
+                if cells.iter().zip(&next).any(|(c, &n)| n < c.len()) {
+                    s.new_page();
                 }
             }
-            // Borders: top and bottom of the row, and every column edge.
-            let (x_start, x_end) = (s.g.margin_left, s.g.margin_left + s.g.content_width());
-            let bottom = top + row_h;
-            if let Some(p) = s.out.pages.last_mut() {
-                p.rules.push(Rule {
-                    x0: x_start,
-                    y0: top,
-                    x1: x_end,
-                    y1: top,
-                });
-                p.rules.push(Rule {
-                    x0: x_start,
-                    y0: bottom,
-                    x1: x_end,
-                    y1: bottom,
-                });
-                for c in 0..=cols {
-                    let x = x_start + c as f32 * col_width;
-                    p.rules.push(Rule {
-                        x0: x,
-                        y0: top,
-                        x1: x,
-                        y1: bottom,
-                    });
-                }
-            }
-            s.y = bottom;
         }
     }
+}
+
+/// How many of `lines` (heights in the last field) fit, in order, within `room`.
+fn lines_that_fit(lines: &[(usize, usize, f32)], room: f32) -> usize {
+    let mut used = 0.0;
+    lines
+        .iter()
+        .take_while(|l| {
+            used += l.2;
+            used <= room + 0.001
+        })
+        .count()
 }
 
 struct Stacked {
@@ -461,6 +507,37 @@ impl Stacker {
     /// page: anything taller than a page goes on an empty page rather than moving on forever.
     fn needs_break(&self, h: f32) -> bool {
         self.y + h > self.g.margin_top + self.g.content_height() && self.y > self.g.margin_top
+    }
+
+    /// Borders around one row piece: top, bottom and every column edge.
+    fn push_borders(&mut self, top: f32, bottom: f32, cols: usize, col_width: f32) {
+        let (x_start, x_end) = (
+            self.g.margin_left,
+            self.g.margin_left + self.g.content_width(),
+        );
+        if let Some(p) = self.out.pages.last_mut() {
+            p.rules.push(Rule {
+                x0: x_start,
+                y0: top,
+                x1: x_end,
+                y1: top,
+            });
+            p.rules.push(Rule {
+                x0: x_start,
+                y0: bottom,
+                x1: x_end,
+                y1: bottom,
+            });
+            for c in 0..=cols {
+                let x = x_start + c as f32 * col_width;
+                p.rules.push(Rule {
+                    x0: x,
+                    y0: top,
+                    x1: x,
+                    y1: bottom,
+                });
+            }
+        }
     }
 
     fn new_page(&mut self) {
