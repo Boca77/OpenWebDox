@@ -229,7 +229,7 @@ async function chord(letter, modifiers) {
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
 }
 const fmt = () => ev("(() => { const s = window.opendox.view.formatState(); return { bold: s.bold, italic: s.italic, align: s.align, font: s.font }; })()");
-/** Font ids drawn on page 0. Demo order: 0 sans, 1 bold, 2 italic, 3 bold italic, 4-7 serif. */
+/** Font ids drawn on page 0. Demo order: 0 sans, 1 arabic, 2 bold, 3 italic, 4 bold italic, 5-8 serif. */
 const fontsOnPage = () => ev(`(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set();
   for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s].sort((a, b) => a - b); })()`);
 const pressed = (id) => ev(`document.getElementById(${JSON.stringify(id)}).getAttribute('aria-pressed') === 'true'`);
@@ -240,13 +240,13 @@ const s1 = (await text()).indexOf("Section 1");
 await click(x, y);
 for (let i = 0; i < 7; i++) await key("ArrowRight", SHIFT);
 await chord("b", CTRL);
-check("Ctrl+B bolds the selection", (await fontsOnPage()).includes(1) && (await fmt()).bold, JSON.stringify(await fontsOnPage()));
+check("Ctrl+B bolds the selection", (await fontsOnPage()).includes(2) && (await fmt()).bold, JSON.stringify(await fontsOnPage()));
 check("toolbar shows bold", await pressed("bold"));
 await chord("z", CTRL);
-check("Ctrl+Z undoes bold", !(await fontsOnPage()).includes(1), JSON.stringify(await fontsOnPage()));
+check("Ctrl+Z undoes bold", !(await fontsOnPage()).includes(2), JSON.stringify(await fontsOnPage()));
 check("undo restores the selection", JSON.stringify(await sel()) === `[${s1},${s1 + 7}]`, JSON.stringify(await sel()));
 await chord("y", CTRL);
-check("Ctrl+Y redoes it", (await fontsOnPage()).includes(1));
+check("Ctrl+Y redoes it", (await fontsOnPage()).includes(2));
 
 // 18. Ctrl+Shift+E centres the paragraph.
 const leftX = (await clientOf(s1))[0];
@@ -263,7 +263,7 @@ await chord("i", CTRL);
 check("Ctrl+I at a caret shows italic pending", (await fmt()).italic);
 const textBefore = await text();
 await send("Input.insertText", { text: "!" });
-check("typed text is italic", (await fontsOnPage()).includes(2), JSON.stringify(await fontsOnPage()));
+check("typed text is italic", (await fontsOnPage()).includes(3), JSON.stringify(await fontsOnPage()));
 await chord("z", CTRL);
 check("undo removes the typed text", (await text()) === textBefore);
 
@@ -272,10 +272,10 @@ check("undo removes the typed text", (await text()) === textBefore);
 await click(x, y);
 for (let i = 0; i < 7; i++) await key("ArrowRight", SHIFT);
 await ev(`(() => { const s = document.getElementById('font'); s.value = 'Noto Serif'; s.dispatchEvent(new Event('change')); })()`);
-check("font menu switches to serif (bold kept)", (await fontsOnPage()).includes(5) && (await fmt()).font === "Noto Serif", JSON.stringify(await fontsOnPage()));
+check("font menu switches to serif (bold kept)", (await fontsOnPage()).includes(6) && (await fmt()).font === "Noto Serif", JSON.stringify(await fontsOnPage()));
 check("editor keeps focus after the toolbar", await ev("document.activeElement?.className === 'opendox-input'"));
 await click(...(await rectOf("#undo")));
-check("Undo button reverts the font", !(await fontsOnPage()).includes(5) && (await fmt()).font === null);
+check("Undo button reverts the font", !(await fontsOnPage()).includes(6) && (await fmt()).font === null);
 
 // 21. Export: both files come out of the real document, PDF with one page per editor page.
 const exported = await ev(`(() => { const e = window.opendox.editor; const pages = e.layout();

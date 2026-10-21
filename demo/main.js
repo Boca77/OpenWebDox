@@ -16,8 +16,13 @@ const PEOPLE = [
   ["Ken", "#9f1239"],
 ];
 
-const FONTS = [
+// The default family, loaded before first paint. Everything else streams in afterwards; until
+// a face arrives its text falls back to these, then reflows (like a web-font swap).
+const STARTUP_FONTS = [
   "../fonts/noto/NotoSans-Regular.ttf",
+  "../fonts/noto/NotoSansArabic-Regular.ttf",
+];
+const LATER_FONTS = [
   "../fonts/noto/NotoSans-Bold.ttf",
   "../fonts/noto/NotoSans-Italic.ttf",
   "../fonts/noto/NotoSans-BoldItalic.ttf",
@@ -25,8 +30,8 @@ const FONTS = [
   "../fonts/noto/NotoSerif-Bold.ttf",
   "../fonts/noto/NotoSerif-Italic.ttf",
   "../fonts/noto/NotoSerif-BoldItalic.ttf",
-  "../fonts/noto/NotoSansArabic-Regular.ttf",
 ];
+const fetchFont = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer());
 const DEFAULT_SIZE = 11;
 
 // Opening of "Alice's Adventures in Wonderland" (Lewis Carroll, 1865; public domain).
@@ -52,8 +57,8 @@ const cpLen = (s) => [...s].length;
 async function main() {
   await init();
   const editor = new Editor();
-  for (const url of FONTS) {
-    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const later = LATER_FONTS.map(fetchFont);
+  for (const bytes of await Promise.all(STARTUP_FONTS.map(fetchFont))) {
     editor.register_font(bytes);
   }
   editor.set_default_font("Noto Sans, Noto Sans Arabic", DEFAULT_SIZE);
@@ -81,13 +86,23 @@ async function main() {
 
   $("zoom").addEventListener("change", (e) => view.setZoom(Number(e.target.value)));
   setUpTablePicker(view);
-  setUpExport(editor);
+  // Downloads run in parallel, but faces register in list order so font ids don't depend on
+  // network timing (the browser checks rely on them).
+  const fontsLoaded = (async () => {
+    for (const bytes of later) {
+      editor.register_font(await bytes);
+      view.relayout();
+    }
+  })();
+  setUpExport(editor, fontsLoaded);
   setUpTableMenu(view);
 
   const collab = DOC_ID ? startCollaboration(editor, view) : null;
 
   // Exposed for automated browser checks.
   window.opendox = { editor, view, collab };
+  // Checks compare glyph fonts, so they wait for every face, not just first paint.
+  await fontsLoaded;
   document.body.dataset.ready = "true";
 }
 
@@ -137,7 +152,8 @@ function personItem(name, color) {
 }
 
 /** File downloads: PDF (exactly as laid out) and .docx (for editing in Word). */
-function setUpExport(editor) {
+/** `fontsLoaded`: exports wait for every face so a PDF never embeds fallback glyphs. */
+function setUpExport(editor, fontsLoaded) {
   const save = (bytes, name, type) => {
     const url = URL.createObjectURL(new Blob([bytes], { type }));
     const a = Object.assign(document.createElement("a"), { href: url, download: name });
@@ -145,16 +161,18 @@ function setUpExport(editor) {
     setTimeout(() => URL.revokeObjectURL(url), 0);
   };
   const title = "opendox demo";
-  $("export-pdf").addEventListener("click", () =>
-    save(editor.export_pdf(title), "opendox.pdf", "application/pdf"),
-  );
-  $("export-docx").addEventListener("click", () =>
+  $("export-pdf").addEventListener("click", async () => {
+    await fontsLoaded;
+    save(editor.export_pdf(title), "opendox.pdf", "application/pdf");
+  });
+  $("export-docx").addEventListener("click", async () => {
+    await fontsLoaded;
     save(
       editor.export_docx(title),
       "opendox.docx",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ),
-  );
+    );
+  });
 }
 
 /** Undo/redo, font, size, bold, italic, alignment and spacing. Returns a refresh function. */

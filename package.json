@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build crates/opendox-wasm --target web --release",
+    "build:wasm": "wasm-pack build crates/opendox-wasm --target web --profile wasm-release",
     "build": "npm run build:wasm && npm run build -w @opendox/editor",
     "serve": "node scripts/serve.mjs",
     "e2e": "node scripts/e2e.mjs",

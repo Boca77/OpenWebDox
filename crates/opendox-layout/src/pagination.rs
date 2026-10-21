@@ -174,6 +174,14 @@ impl Paginator {
         self.geometry = geometry;
     }
 
+    /// Forgets every cached paragraph layout, so the next call shapes everything again.
+    ///
+    /// Call after registering a font: the cache is keyed by content, so paragraphs that asked
+    /// for the new face earlier would otherwise keep their fallback shaping.
+    pub fn invalidate(&mut self) {
+        self.cache.clear();
+    }
+
     /// Lays out a document made only of paragraphs.
     pub fn layout(&mut self, engine: &mut LayoutEngine, paragraphs: &[ParagraphInput]) -> &[Page] {
         let blocks: Vec<BlockInput> = paragraphs

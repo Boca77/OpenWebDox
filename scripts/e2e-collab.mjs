@@ -177,7 +177,8 @@ check(
   "bold and centring reach B",
   await until(async () => {
     const fonts = await b.ev("(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set(); for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s]; })()");
-    return fonts.includes(1) && (await b.ev("window.opendox.editor.paragraph_format(0)[0]")) === 1;
+    // Font 2 is Noto Sans Bold in the demo's registration order.
+    return fonts.includes(2) && (await b.ev("window.opendox.editor.paragraph_format(0)[0]")) === 1;
   }),
 );
 

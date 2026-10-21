@@ -36,6 +36,14 @@ opendox-layout = { path = "crates/opendox-layout" }
 opendox-sync = { path = "crates/opendox-sync" }
 opendox-export = { path = "crates/opendox-export" }
 
+# Browser build (`npm run build:wasm`): smaller download for ~8% slower keystrokes (measured).
+# "z" was smaller still but ~65% slower. The native server keeps plain `release`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 

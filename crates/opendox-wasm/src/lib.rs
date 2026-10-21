@@ -83,8 +83,10 @@ impl Editor {
         }
     }
 
-    /// Registers a font file and returns its id.
+    /// Registers a font file and returns its id. Fonts may arrive after the first layout; the
+    /// next `layout` call then reshapes every paragraph so text waiting on this face picks it up.
     pub fn register_font(&mut self, data: Vec<u8>) -> u32 {
+        self.paginator.invalidate();
         self.engine.fonts_mut().register(data).0
     }
 
@@ -1133,6 +1135,21 @@ mod tests {
         e.insert(7, "x").unwrap();
         e.layout();
         assert_eq!(e.char_format(7, 8), vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn font_registered_after_layout_reaches_text_already_laid_out() {
+        let mut e = editor_with("plain bold");
+        e.set_bold(6, 10, true).unwrap();
+        e.layout();
+        assert_eq!(
+            page_fonts(&e),
+            vec![0],
+            "no bold face yet: falls back to regular"
+        );
+        let bold = e.register_font(BOLD.to_vec());
+        e.layout();
+        assert_eq!(page_fonts(&e), vec![0, bold]);
     }
 
     #[test]
