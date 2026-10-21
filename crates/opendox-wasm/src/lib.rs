@@ -4,6 +4,7 @@
 //! Positions passed in from JS are **flat positions** (see `opendox_model::Outline`): one number
 //! per caret position, counting body text and table cells together in reading order.
 
+use opendox_export::{DocxOptions, PdfInfo};
 use opendox_layout::{
     BlockInput, FontId, FontLibrary, LayoutEngine, PageGeometry, Paginator, ParagraphInput,
     ParagraphStyle, StyleSpan, TableInput, TextPosition, TextStyle,
@@ -394,6 +395,36 @@ impl Editor {
         self.doc.delete_table(&id)?;
         let fresh = self.doc.outline();
         Ok(fresh.snap(fresh.flat_of_body(placeholder)))
+    }
+
+    // --- export ---------------------------------------------------------------------------
+
+    /// The document as a PDF, page for page as the editor lays it out, with the fonts
+    /// embedded. `title` goes in the PDF's metadata (empty for none).
+    pub fn export_pdf(&mut self, title: &str) -> Result<Vec<u8>, JsError> {
+        self.layout();
+        let texts: Vec<&str> = self.outline.slots.iter().map(|s| s.text.as_str()).collect();
+        let info = PdfInfo {
+            title: (!title.is_empty()).then_some(title),
+        };
+        Ok(opendox_export::pdf(
+            &self.paginator,
+            self.engine.fonts(),
+            &texts,
+            &info,
+        )?)
+    }
+
+    /// The document as a Word (.docx) file: text, formatting, tables and page setup. Word
+    /// lays it out itself, so line breaks may differ; fonts are referenced by name.
+    pub fn export_docx(&self, title: &str) -> Result<Vec<u8>, JsError> {
+        let options = DocxOptions {
+            default_font: &self.style.font_family,
+            default_size: self.style.font_size,
+            page: *self.paginator.geometry(),
+            title: (!title.is_empty()).then_some(title),
+        };
+        Ok(opendox_export::docx(&self.doc, &options)?)
     }
 
     // --- collaboration --------------------------------------------------------------------

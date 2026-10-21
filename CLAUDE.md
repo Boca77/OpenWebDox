@@ -20,6 +20,7 @@ crates/
   opendox-sync     sync protocol + client session state, no I/O (used by wasm and server)
   opendox-wasm     wasm-bindgen bindings for model + layout + sync
   opendox-server   WebSocket sync server (axum), storage trait, SQLite adapter
+  opendox-export   PDF (from layout, print-exact) and .docx (from the model) export
 packages/
   editor           TS: canvas renderer, input (hidden textarea, IME), selection, collaboration
 demo/              dev harness page (plain ES modules, no bundler)

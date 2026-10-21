@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 opendox-model.workspace = true
 opendox-layout.workspace = true
 opendox-sync.workspace = true
+opendox-export.workspace = true
 wasm-bindgen.workspace = true
 
 [lints]

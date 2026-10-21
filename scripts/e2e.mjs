@@ -277,6 +277,17 @@ check("editor keeps focus after the toolbar", await ev("document.activeElement?.
 await click(...(await rectOf("#undo")));
 check("Undo button reverts the font", !(await fontsOnPage()).includes(5) && (await fmt()).font === null);
 
+// 21. Export: both files come out of the real document, PDF with one page per editor page.
+const exported = await ev(`(() => { const e = window.opendox.editor; const pages = e.layout();
+  const pdf = e.export_pdf('e2e'); const docx = e.export_docx('e2e');
+  const head = (b, n) => String.fromCharCode(...b.slice(0, n));
+  const pdfText = new TextDecoder('latin1').decode(pdf);
+  return { pages, pdfHead: head(pdf, 5), pdfPages: (pdfText.match(/\\/Type \\/Page\\b/g) || []).length,
+    docxHead: head(docx, 2), pdfKb: Math.round(pdf.length / 1024) }; })()`);
+check("PDF export", exported.pdfHead === "%PDF-" && exported.pdfPages === exported.pages, JSON.stringify(exported));
+check(".docx export is a zip", exported.docxHead === "PK", JSON.stringify(exported));
+check("export buttons present", await ev("!!document.getElementById('export-pdf') && !!document.getElementById('export-docx')"));
+
 // 10. Typing latency on a 3-page document.
 const t = await ev(`(async () => { const v = window.opendox.view; const times = [];
   for (let i = 0; i < 20; i++) { const t0 = performance.now(); v.insertText('a'); times.push(performance.now() - t0); }

@@ -81,6 +81,7 @@ async function main() {
 
   $("zoom").addEventListener("change", (e) => view.setZoom(Number(e.target.value)));
   setUpTablePicker(view);
+  setUpExport(editor);
   setUpTableMenu(view);
 
   const collab = DOC_ID ? startCollaboration(editor, view) : null;
@@ -133,6 +134,27 @@ function personItem(name, color) {
   swatch.style.background = color;
   li.append(swatch, name);
   return li;
+}
+
+/** File downloads: PDF (exactly as laid out) and .docx (for editing in Word). */
+function setUpExport(editor) {
+  const save = (bytes, name, type) => {
+    const url = URL.createObjectURL(new Blob([bytes], { type }));
+    const a = Object.assign(document.createElement("a"), { href: url, download: name });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  const title = "opendox demo";
+  $("export-pdf").addEventListener("click", () =>
+    save(editor.export_pdf(title), "opendox.pdf", "application/pdf"),
+  );
+  $("export-docx").addEventListener("click", () =>
+    save(
+      editor.export_docx(title),
+      "opendox.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+  );
 }
 
 /** Undo/redo, font, size, bold, italic, alignment and spacing. Returns a refresh function. */

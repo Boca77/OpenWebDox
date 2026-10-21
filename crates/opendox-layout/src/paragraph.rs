@@ -130,6 +130,10 @@ pub struct GlyphRun {
     pub byte_range: Range<usize>,
     pub rtl: bool,
     pub glyphs: Vec<Glyph>,
+    /// For each glyph, the paragraph text it draws (byte range), for copy and search in
+    /// exported PDFs. A ligature's glyph covers all the characters it joins; the extra glyphs
+    /// of a character drawn with several share its range.
+    pub glyph_text: Vec<Range<usize>>,
 }
 
 /// A glyph placed at its baseline origin.
@@ -224,20 +228,23 @@ impl LayoutEngine {
                         // Every font parley can pick came from our library, so this lookup only
                         // fails if that invariant breaks; skip the run rather than crash.
                         let id = self.fonts.id_of(&font.data)?;
+                        let glyphs: Vec<Glyph> = g
+                            .positioned_glyphs()
+                            .map(|gl| Glyph {
+                                id: gl.id,
+                                x: gl.x,
+                                y: gl.y,
+                            })
+                            .collect();
+                        let glyph_text = glyph_text(run, glyphs.len());
                         Some(GlyphRun {
                             font: id,
                             face_index: font.index,
                             font_size: run.font_size(),
                             byte_range: run.text_range(),
                             rtl: run.is_rtl(),
-                            glyphs: g
-                                .positioned_glyphs()
-                                .map(|gl| Glyph {
-                                    id: gl.id,
-                                    x: gl.x,
-                                    y: gl.y,
-                                })
-                                .collect(),
+                            glyphs,
+                            glyph_text,
                         })
                     })
                     .collect();
@@ -259,6 +266,36 @@ impl LayoutEngine {
             lines,
         }
     }
+}
+
+/// The text each glyph of `run` draws, in the visual order parley positions glyphs in.
+fn glyph_text(run: &parley::Run<'_, ()>, glyphs: usize) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::with_capacity(glyphs);
+    // A cluster with no glyphs is part of a ligature drawn by its logically preceding
+    // cluster: the previous one in visual order, or the next one in right-to-left runs.
+    let mut pending: Option<Range<usize>> = None;
+    let join = |a: Range<usize>, b: &Range<usize>| a.start.min(b.start)..a.end.max(b.end);
+    for cluster in run.visual_clusters() {
+        let mut r = cluster.text_range();
+        let n = cluster.glyphs().count();
+        if n == 0 {
+            match out.last_mut() {
+                Some(last) if !run.is_rtl() => *last = join(last.clone(), &r),
+                _ => pending = Some(pending.map_or(r.clone(), |p| join(p, &r))),
+            }
+            continue;
+        }
+        if let Some(p) = pending.take() {
+            r = join(r, &p);
+        }
+        out.extend(std::iter::repeat_n(r, n));
+    }
+    if out.len() != glyphs {
+        // Never seen; parley documents both walks as producing the same glyphs. If they ever
+        // disagree, attribute the whole run to every glyph rather than mislabel them.
+        return vec![run.text_range(); glyphs];
+    }
+    out
 }
 
 fn push_default_style(b: &mut parley::RangedBuilder<'_, ()>, s: &TextStyle) {

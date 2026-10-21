@@ -79,15 +79,36 @@ button; `npm run e2e:collab` checks formatting reaches the other tab.
 - Property test: 3 replicas, concurrent text edits, character and paragraph formatting,
   delivered in random order, converge to identical text and formats.
 
+## M8 — Export ✅
+Checked by hand: the demo's PDF read back with poppler (`pdftotext`) and PyMuPDF, and its
+.docx opened in Microsoft Word, which reports the same formats, a 3×3 bordered table and the
+same 3 pages, and renders it close to the editor (differences in Known debt).
+- `opendox-export` (D12): **PDF** drawn from layout output: every glyph at the position layout
+  computed, table borders, subsetted embedded fonts, ToUnicode + ActualText so text extracts
+  correctly (ligatures, combining marks, emoji, Arabic). **.docx** from the model: text,
+  bold/italic/size/font, alignment, line spacing, space before/after, tables with borders and
+  equal columns, page size and margins.
+- Done: tests read the PDF back and check page count/size, every glyph position against layout,
+  borders, embedded subset fonts, extractable text and byte-identical output; .docx tests check
+  the package parts and the generated XML. Demo has Download PDF / Download .docx;
+  `npm run e2e` checks both exports from the live page.
+
 ## Known debt
 - `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
   now; must become per-paragraph before large documents are usable.
-- WASM bundle is 4.3 MB (mostly Loro), not size-tuned yet (no LTO / opt-level "z").
+- WASM bundle is 5.5 MB (mostly Loro; PDF writing and font subsetting added 1.2 MB), not
+  size-tuned yet (no LTO / opt-level "z"). Export could move to a separately loaded module.
 - Renderer draws every page on every render; should draw only pages in view.
 - No emoji or CJK font bundled: those characters render as empty boxes (layout is correct).
 - Pagination restacks every line on every call.
 - Editing gaps: no Ctrl+Arrow word movement, no double/triple-click selection, no rich
   clipboard (plain text only, so pasting drops formatting).
+- Export gaps: the .docx names fonts but doesn't embed them, so Word on a machine without Noto
+  substitutes other fonts (and then breaks lines differently). Word also places the extra
+  space of line spacing below each line while our layout splits it above and below, so 1.5 and
+  double spacing look slightly different in Word. The PDF positions every glyph separately
+  (larger content streams than run-based text), has no tagged structure (not PDF/UA), no
+  outline/bookmarks and no hyperlinks.
 - Formatting gaps: no underline, strikethrough, colour, highlight, links, styles (Heading 1…),
   indents or lists. Only two font families (Noto Sans, Noto Serif). A family with no italic
   face (Noto Sans Arabic) draws upright: we never slant glyphs synthetically.

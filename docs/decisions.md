@@ -111,5 +111,24 @@ sending every keystroke as its own message.
   source and licence as the existing Noto files) so italics are real faces and there's a second
   family. Adds about 4.3 MB to the repo.
 
+## D12 — Export: PDF from layout, .docx from the model (2026-10-21)
+New crate `opendox-export`, depending on both `opendox-layout` and `opendox-model` (layout still
+depends on neither).
+- **PDF is drawn from layout output**, never re-laid out: each glyph is placed with its own
+  text matrix at the exact position layout computed, so pages and line breaks match the editor
+  and every browser. Fonts are embedded as subsets (`subsetter`) in CID-keyed Type 0 fonts whose
+  codes are subset glyph ids (Identity-H), written with `pdf-writer` (both from Typst, pure
+  Rust, so export also runs in the browser). Text extraction: layout now records which text
+  each glyph draws (`GlyphRun::glyph_text`); a ToUnicode map covers ordinary glyphs, and
+  characters drawn with several glyphs or with the missing-glyph box get an `ActualText` span,
+  since a ToUnicode map is per glyph id and can't express those.
+- **.docx is written from the document model**, not from layout: Word re-lays out text with its
+  own engine, so the useful content is structure and formatting (runs, paragraph properties,
+  tables, page setup). A small built-in ZIP writer (deflate via `miniz_oxide`) avoids a zip
+  dependency. Output is deterministic (fixed timestamps), as is the PDF.
+Rejected: printing through the browser (`window.print`), which would lay text out with the
+browser's engine and break D3; and producing .docx from layout with absolute positioning,
+which Word users couldn't edit.
+
 ## Open
 - Colour emoji rendering.
