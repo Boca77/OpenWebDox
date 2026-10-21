@@ -27,6 +27,7 @@ demo/              dev harness page (plain ES modules, no bundler)
 scripts/serve.mjs  zero-dependency static server for the demo
 docs/
   roadmap.md       milestones and done-criteria — work milestone by milestone
+  handoff.md       where things stand, what's next, known traps — read first
   decisions.md     decision log — append, never rewrite history
 ```
 
