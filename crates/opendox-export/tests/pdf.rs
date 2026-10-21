@@ -57,6 +57,7 @@ fn doc(body: usize) -> Doc {
         base: &base,
         spans,
         style: ParagraphStyle::default(),
+        objects: &[],
     };
     let bold: &'static [StyleSpan] = Box::leak(Box::new(bold));
     let mut blocks = vec![BlockInput::Paragraph(para(0, bold))];
@@ -87,6 +88,7 @@ fn export(d: &Doc) -> Vec<u8> {
         &texts,
         &PdfInfo {
             title: Some("Test"),
+            ..PdfInfo::default()
         },
     )
     .unwrap()
@@ -219,6 +221,7 @@ fn characters_drawn_with_several_glyphs_carry_their_text_once() {
             base: &base,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         }],
     );
     let fonts = std::mem::replace(engine.fonts_mut(), FontLibrary::new());

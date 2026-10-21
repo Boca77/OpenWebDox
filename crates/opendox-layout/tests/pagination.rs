@@ -30,6 +30,7 @@ fn inputs<'a>(texts: &'a [String], base: &'a TextStyle) -> Vec<ParagraphInput<'a
             base,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         })
         .collect()
 }
@@ -125,18 +126,21 @@ fn line_taller_than_page_gets_its_own_page() {
             base: &base,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         },
         ParagraphInput {
             text: &texts[1],
             base: &huge,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         },
         ParagraphInput {
             text: &texts[2],
             base: &base,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         },
     ];
     let mut p = Paginator::new(PageGeometry::letter());

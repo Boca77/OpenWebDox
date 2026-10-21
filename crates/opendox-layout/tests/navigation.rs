@@ -29,6 +29,7 @@ fn paginate(texts: &[&str]) -> Paginator {
             base: &style,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         })
         .collect();
     let mut p = Paginator::new(PageGeometry::letter());

@@ -14,6 +14,7 @@ mod error;
 mod format;
 mod grapheme;
 mod history;
+mod image;
 mod outline;
 mod table;
 
@@ -23,5 +24,6 @@ pub use format::{
     Align, CharFormat, FormatChange, FormatRun, ParagraphChange, ParagraphFormat, SlotFormat,
 };
 pub use history::History;
+pub use image::{ImageChange, ImageData, ImageProps, ImageRef, Recolor, Wrap, IMAGE_PLACEHOLDER};
 pub use outline::{Block, Location, Outline, Slot, TableBlock, TextRef};
 pub use table::{CellRef, TABLE_PLACEHOLDER};

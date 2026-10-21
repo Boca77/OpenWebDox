@@ -32,6 +32,7 @@ fn para<'a>(text: &'a str, s: &'a TextStyle) -> ParagraphInput<'a> {
         base: s,
         spans: &[],
         style: ParagraphStyle::default(),
+        objects: &[],
     }
 }
 

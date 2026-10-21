@@ -16,7 +16,10 @@ Milestones M0–M8 are done and pushed to `main` (last: `d14b95e`, M8 export).
 | Editor (`packages/editor`) | canvas renderer, IME, selection, formatting shortcuts, collaboration |
 | Export (`opendox-export`) | print-exact PDF from layout; .docx from the model |
 
-Not built: lists, images, headers/footers, footnotes, links, comments, auth.
+Images (M9, D13) are built: in line / wrap / break / behind / in front, resize, squish,
+rotate, drag, recolor, adjustments, alt text, PDF and .docx export. `npm run e2e:images`.
+
+Not built: lists, headers/footers, footnotes, links, comments, auth.
 
 ## How to run and verify
 

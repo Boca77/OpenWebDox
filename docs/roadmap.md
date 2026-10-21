@@ -93,7 +93,32 @@ same 3 pages, and renders it close to the editor (differences in Known debt).
   the package parts and the generated XML. Demo has Download PDF / Download .docx;
   `npm run e2e` checks both exports from the live page.
 
+## M9 — Images ✅
+`npm run e2e:images` drives the demo: insert, select, corner resize, side squish, rotate,
+wrap menu, drag, options panel, Delete + Ctrl+Z, and checks both exports carry the image.
+Checked by hand: the .docx opens in Microsoft Word with the picture, size, square wrapping and
+alt text, and Word's rendering matches our PDF.
+- D13: placeholder in the paragraph + per-property image record; in line, wrap text, break
+  text, behind text, in front of text; size, rotation, offset, recolor, brightness, contrast,
+  transparency, alt text. Insert button, paste and drag-and-drop of image files.
+- Editor: frame with 8 handles (corners keep proportions, Shift frees them; sides squish),
+  rotate handle (snaps to right angles, Shift = 15° steps), drag to move (positioned images
+  re-anchor to the paragraph they land beside), arrow keys nudge, Delete removes. Demo:
+  floating toolbar (wrap menu, Image options, Delete) and the Image options panel.
+- Tests: model (convergence, undo, paragraph formats beside images, cells), layout (inline
+  boxes, carets, break bands, wrapping incl. following paragraphs, too-wide images, layers,
+  repeatability), wasm (placement, wrap switch keeps position, drag, delete/undo), export
+  (PDF picture + mask + transform, .docx parts and XML).
+
 ## Known debt
+- Images: wrapped text uses one side only (the wider one). No cropping, no "fix position on
+  page" (positioned images always move with their paragraph), no image margins setting, no
+  copy/paste of images inside the editor (pasted text drops them), no alt text in the PDF
+  (needs tagged PDF), no rich picture of the image for screen readers in the editor (canvas).
+  Images live inside the document, so many large photos make big snapshots (server message
+  limit is 32 MB).
+- Images: a slow live preview on very large images (adjustment sliders re-process the pixels
+  in JS on every move).
 - `opendox-model` grapheme checks scan the whole document text on every edit (O(n)). Fine for
   now; must become per-paragraph before large documents are usable.
 - WASM bundle is 5.5 MB (mostly Loro; PDF writing and font subsetting added 1.2 MB), not
@@ -142,5 +167,5 @@ same 3 pages, and renders it close to the editor (differences in Known debt).
   once page breaks match the previous pass.
 
 ## Later
-Lists and numbering, tables, images, headers/footers, footnotes, bidi, comments/suggestions,
+Lists and numbering, tables, headers/footers, footnotes, bidi, comments/suggestions,
 clipboard HTML, PDF and .docx export, accessibility mirror DOM.

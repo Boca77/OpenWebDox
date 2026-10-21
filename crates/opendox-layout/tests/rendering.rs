@@ -62,6 +62,7 @@ fn placed_glyphs_sit_inside_the_page_margins() {
             base: &style,
             spans: &[],
             style: ParagraphStyle::default(),
+            objects: &[],
         })
         .collect();
     let g = PageGeometry::letter();

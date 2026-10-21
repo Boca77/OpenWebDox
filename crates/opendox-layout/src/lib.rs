@@ -17,10 +17,11 @@ mod paragraph;
 pub use fonts::{FontId, FontLibrary, GlyphOutline};
 pub use navigation::{CaretRect, PlacedLine, Rect, SelectionRect, TextPosition};
 pub use pagination::{
-    BlockInput, Fragment, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph, Rule,
-    TableInput, CELL_PADDING,
+    BlockInput, Fragment, Layer, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph,
+    PlacedObject, Rule, TableInput, BREAK_MARGIN, CELL_PADDING, WRAP_MARGIN,
 };
 pub use paragraph::{
-    Align, CaretStop, Glyph, GlyphRun, LayoutEngine, Line, ParagraphLayout, ParagraphStyle,
-    StyleSpan, TextStyle,
+    inline_size, Align, CaretStop, Exclusion, Glyph, GlyphRun, LayoutEngine, Line, LineObject,
+    ObjectInput, ObjectMode, ParagraphLayout, ParagraphStyle, StyleSpan, TextStyle, MIN_WRAP_WIDTH,
+    OBJECT_PLACEHOLDER,
 };

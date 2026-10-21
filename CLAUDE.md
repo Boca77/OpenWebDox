@@ -71,6 +71,7 @@ npm install            # once
 npm run build          # wasm-pack build of opendox-wasm + tsc for packages/editor
 npm run serve          # demo at http://127.0.0.1:5174/demo/
 npm run e2e            # browser interaction checks (needs serve running)
+npm run e2e:images     # image checks: insert, resize, rotate, wrap, drag, panel, export (needs serve)
 npm run sync-server    # sync server at ws://127.0.0.1:5175 (SQLite in the temp folder; --memory)
 npm run e2e:collab     # two-tab collaboration checks (needs serve + sync-server running)
 ```

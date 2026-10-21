@@ -10,6 +10,7 @@ use loro::{
 use crate::error::ModelError;
 use crate::format::{mark_paragraph, CharFormat, CHAR_KEYS, PARAGRAPH_KEYS};
 use crate::grapheme;
+use crate::image::IMAGE_MARK;
 use crate::outline::{Outline, TableInput, TextRef};
 use crate::table::{cell_container, CellRef, TableHandle, TABLES, TABLE_MARK, TABLE_PLACEHOLDER};
 
@@ -124,6 +125,7 @@ impl Document {
             expand: ExpandType::None,
         };
         styles.insert(TABLE_MARK.into(), never);
+        styles.insert(IMAGE_MARK.into(), never);
         for key in PARAGRAPH_KEYS {
             styles.insert(key.into(), never);
         }
@@ -143,7 +145,7 @@ impl Document {
     }
 
     /// A fresh id, unique across replicas: replica id + a local sequence number.
-    fn new_id(&self, prefix: &str) -> String {
+    pub(crate) fn new_id(&self, prefix: &str) -> String {
         let seq = self.id_seq.get();
         self.id_seq.set(seq + 1);
         let peer = self.doc.peer_id();
@@ -480,7 +482,7 @@ impl Document {
 impl Document {
     /// Inserts `s` at flat position `pos`; returns the flat position just after it.
     pub fn insert_at(&self, outline: &Outline, pos: usize, s: &str) -> Result<usize, ModelError> {
-        // A pasted placeholder would look like a table to nothing; drop it.
+        // A pasted placeholder would look like a table or image to nothing; drop it.
         let clean: String = s.chars().filter(|&c| c != TABLE_PLACEHOLDER).collect();
         if clean.is_empty() {
             return Ok(pos);
@@ -652,7 +654,7 @@ impl Document {
     }
 
     /// Body placeholders that refer to an existing table: `(char index, table id)`.
-    fn placeholders(&self) -> Vec<(usize, String)> {
+    pub(crate) fn placeholders(&self) -> Vec<(usize, String)> {
         let mut out: Vec<(usize, String)> = Vec::new();
         let mut pos = 0;
         for d in self.body().to_delta() {

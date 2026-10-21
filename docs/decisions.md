@@ -130,5 +130,35 @@ Rejected: printing through the browser (`window.print`), which would lay text ou
 browser's engine and break D3; and producing .docx from layout with absolute positioning,
 which Word users couldn't edit.
 
+## D13 — Images: placeholder in the paragraph, per-property record, layout-side wrapping (2026-10-21)
+- **Model.** An image is one U+FFFC in its paragraph marked `image = <id>` (expand: none), plus
+  `images[id]` = a Loro map with the file bytes, mime, pixel size and one key per property
+  (size, rotation, wrap mode, x/y offset, recolor, brightness, contrast, transparency, alt).
+  Same reasoning as D9: typing and splitting around an image stay plain text edits. One key
+  per property means concurrent changes to different properties both survive. Deleting the
+  placeholder keeps the record, so undo brings the image back. The bytes are stored in the
+  document and synced like everything else; the browser re-encodes inserts as JPEG (opaque)
+  or PNG (transparency) at ≤ 2000 px to keep that bounded. Because tables and images share
+  U+FFFC, the paragraph-format lookup now asks which U+FFFC are tables instead of trusting
+  the character.
+- **Layout (still model-free).** `ParagraphInput.objects` carries each image's byte offset,
+  size, rotation, mode and offset. Placeholders are shaped as zero-width spaces (same 3 UTF-8
+  bytes) and draw nothing. In line → parley inline box sized to the rotated bounding box,
+  shrunk to the line if wider. Break text → a band of its own before the line holding it.
+  Behind / in front → placed at paragraph top + offset, no effect on text. Wrap text → lines
+  beside the image get the widest gap left (Word's "largest side"; never both sides), lines
+  with no gap ≥ 36pt move below it; pagination redoes layout until text settles (≤ 5 passes,
+  one pass when no image wraps), with the wrap areas in the paragraph cache key. Images in
+  table cells are always in line.
+- **Look.** Recolor (grayscale/sepia/negative), then brightness/contrast, by one formula
+  implemented in Rust (`opendox_export::adjust`, PDF) and TypeScript (renderer) — keep them
+  identical. PDF embeds unadjusted JPEGs as-is and decodes the rest (`png`, `zune-jpeg`).
+  .docx maps to Word pictures (inline / anchor with square, top-and-bottom, behind or none
+  wrapping); sepia becomes a duotone, negative isn't expressible.
+Rejected: images as their own blocks between paragraphs (in-line images and wrapping need
+them inside paragraphs), storing images outside the document (needs a blob service; later,
+if documents with many photos get too big to sync), wrapping text on both sides (parley
+breaks one span per line).
+
 ## Open
 - Colour emoji rendering.

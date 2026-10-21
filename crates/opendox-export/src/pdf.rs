@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use opendox_layout::{FontId, FontLibrary, Paginator};
+use opendox_layout::{FontId, FontLibrary, Layer, Paginator, PlacedObject};
 use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use skrifa::instance::{LocationRef, Size};
@@ -19,6 +19,7 @@ use skrifa::string::StringId;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use subsetter::GlyphRemapper;
 
+use crate::image::{prepare, ExportImage, Prepared};
 use crate::ExportError;
 
 /// Text and table-border colour, the same ink the editor draws with (#1d2129).
@@ -26,10 +27,13 @@ const INK: [f32; 3] = [29.0 / 255.0, 33.0 / 255.0, 41.0 / 255.0];
 /// Table border width in points, as in the editor.
 const RULE_WIDTH: f32 = 0.75;
 
-/// Document metadata for [`pdf`].
+/// Document metadata and pictures for [`pdf`].
 #[derive(Debug, Clone, Default)]
 pub struct PdfInfo<'a> {
     pub title: Option<&'a str>,
+    /// The picture for each object layout placed, indexed by [`PlacedObject::key`]. An object
+    /// without one (or whose file can't be decoded) is left out.
+    pub images: &'a [Option<ExportImage<'a>>],
 }
 
 /// Writes the pages from `paginator`'s last layout as a PDF.
@@ -47,8 +51,26 @@ pub fn pdf(
     let mut used: BTreeMap<(u32, u32), UsedFont> = BTreeMap::new();
     let mut contents: Vec<Vec<u8>> = Vec::new();
 
+    // Every picture drawn, decoded once however often it appears.
+    let mut pictures: BTreeMap<usize, (Prepared, f32)> = BTreeMap::new();
+    for o in paginator.pages().iter().flat_map(|p| &p.objects) {
+        if pictures.contains_key(&o.key) {
+            continue;
+        }
+        let Some(Some(img)) = info.images.get(o.key) else {
+            continue;
+        };
+        if let Some(prepared) = prepare(img) {
+            pictures.insert(o.key, (prepared, img.alpha()));
+        }
+    }
+
     for (index, page) in paginator.pages().iter().enumerate() {
         let mut c = Content::new();
+        // Behind the text first, then those among it (they never overlap it).
+        for o in page.objects.iter().filter(|o| o.layer != Layer::Front) {
+            draw_picture(&mut c, o, height, &pictures);
+        }
         c.set_fill_rgb(INK[0], INK[1], INK[2]);
         // The same walk as `Paginator::placed_glyphs`, keeping each run's font and text.
         for f in &page.fragments {
@@ -109,6 +131,9 @@ pub fn pdf(
             }
             c.stroke();
         }
+        for o in page.objects.iter().filter(|o| o.layer == Layer::Front) {
+            draw_picture(&mut c, o, height, &pictures);
+        }
         let _ = index;
         contents.push(c.finish().into_vec());
     }
@@ -125,6 +150,11 @@ pub fn pdf(
     let info_id = alloc();
     let page_ids: Vec<(Ref, Ref)> = contents.iter().map(|_| (alloc(), alloc())).collect();
     let font_ids: Vec<Ref> = used.values().map(|_| alloc()).collect();
+    // Per picture: the image, its alpha mask if it has one, a graphics state if see-through.
+    let picture_ids: BTreeMap<usize, (Ref, Ref, Ref)> = pictures
+        .keys()
+        .map(|k| (*k, (alloc(), alloc(), alloc())))
+        .collect();
 
     pdf.catalog(catalog).pages(tree);
     pdf.pages(tree)
@@ -147,6 +177,18 @@ pub fn pdf(
             dict.pair(Name(font.name.as_bytes()), *id);
         }
         dict.finish();
+        if !pictures.is_empty() {
+            let mut x = res.x_objects();
+            for (key, (image, _, _)) in &picture_ids {
+                x.pair(Name(picture_name(*key).as_bytes()), *image);
+            }
+            x.finish();
+            let mut g = res.ext_g_states();
+            for (key, (_, _, state)) in &picture_ids {
+                g.pair(Name(alpha_name(*key).as_bytes()), *state);
+            }
+            g.finish();
+        }
         res.finish();
         page.finish();
         let packed = deflate(content);
@@ -160,7 +202,104 @@ pub fn pdf(
         write_font(&mut pdf, &mut alloc, *type0, data, face, font)?;
     }
 
+    for (key, (prepared, alpha)) in &pictures {
+        let Some(&(image, mask, state)) = picture_ids.get(key) else {
+            continue;
+        };
+        write_picture(&mut pdf, prepared, image, mask);
+        pdf.ext_graphics(state)
+            .non_stroking_alpha(*alpha)
+            .stroking_alpha(*alpha);
+    }
+
     Ok(pdf.finish())
+}
+
+fn picture_name(key: usize) -> String {
+    format!("Im{key}")
+}
+
+fn alpha_name(key: usize) -> String {
+    format!("Ga{key}")
+}
+
+/// Draws a placed picture: its unit square scaled to the drawn size, rotated about the centre
+/// of its bounding box. PDF's y axis points up, so a clockwise turn is a negative angle.
+fn draw_picture(
+    c: &mut Content,
+    o: &PlacedObject,
+    page_height: f32,
+    pictures: &BTreeMap<usize, (Prepared, f32)>,
+) {
+    let Some((_, alpha)) = pictures.get(&o.key) else {
+        return;
+    };
+    let b = o.bounds;
+    let (cx, cy) = (b.x + b.width / 2.0, page_height - (b.y + b.height / 2.0));
+    let t = -o.rotation.to_radians();
+    let (sin, cos) = t.sin_cos();
+    let (a, bb, cc, d) = (
+        o.width * cos,
+        o.width * sin,
+        -o.height * sin,
+        o.height * cos,
+    );
+    c.save_state();
+    if *alpha < 1.0 {
+        c.set_parameters(Name(alpha_name(o.key).as_bytes()));
+    }
+    c.transform([a, bb, cc, d, cx - 0.5 * (a + cc), cy - 0.5 * (bb + d)]);
+    c.x_object(Name(picture_name(o.key).as_bytes()));
+    c.restore_state();
+}
+
+/// Writes a picture as an image XObject (with an alpha mask if it has transparent pixels).
+fn write_picture(pdf: &mut Pdf, prepared: &Prepared, image: Ref, mask: Ref) {
+    match prepared {
+        Prepared::Jpeg {
+            data,
+            width,
+            height,
+            gray,
+        } => {
+            let mut x = pdf.image_xobject(image, data);
+            x.filter(Filter::DctDecode);
+            x.width(*width as i32);
+            x.height(*height as i32);
+            if *gray {
+                x.color_space().device_gray();
+            } else {
+                x.color_space().device_rgb();
+            }
+            x.bits_per_component(8);
+        }
+        Prepared::Pixels {
+            width,
+            height,
+            rgb,
+            alpha,
+        } => {
+            if let Some(alpha) = alpha {
+                let packed = deflate(alpha);
+                let mut m = pdf.image_xobject(mask, &packed);
+                m.filter(Filter::FlateDecode);
+                m.width(*width as i32);
+                m.height(*height as i32);
+                m.color_space().device_gray();
+                m.bits_per_component(8);
+            }
+            let packed = deflate(rgb);
+            let mut x = pdf.image_xobject(image, &packed);
+            x.filter(Filter::FlateDecode);
+            x.width(*width as i32);
+            x.height(*height as i32);
+            x.color_space().device_rgb();
+            x.bits_per_component(8);
+            if alpha.is_some() {
+                x.s_mask(mask);
+            }
+        }
+    }
 }
 
 /// A font as used in the document: its resource name, the glyphs drawn, and their text.

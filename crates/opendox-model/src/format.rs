@@ -19,8 +19,8 @@ use loro::{LoroMap, LoroText, LoroValue, TextDelta, ValueOrContainer};
 
 use crate::document::Document;
 use crate::error::ModelError;
+use crate::image::{ImageRef, IMAGE_MARK, IMAGE_PLACEHOLDER};
 use crate::outline::{Outline, TextRef};
-use crate::table::TABLE_PLACEHOLDER;
 
 pub(crate) const BOLD: &str = "bold";
 pub(crate) const ITALIC: &str = "italic";
@@ -151,6 +151,8 @@ pub struct FormatRun {
 pub struct SlotFormat {
     pub runs: Vec<FormatRun>,
     pub paragraph: ParagraphFormat,
+    /// Images anchored in the paragraph, in text order.
+    pub images: Vec<ImageRef>,
 }
 
 type Attrs = Vec<(String, LoroValue)>;
@@ -270,9 +272,26 @@ impl Document {
                 } else {
                     self.tail_format(&slot.container)
                 };
+                let images = slot
+                    .text
+                    .chars()
+                    .enumerate()
+                    .filter(|(_, c)| *c == IMAGE_PLACEHOLDER)
+                    .filter_map(|(k, _)| {
+                        let id = m
+                            .attrs_at(slot.offset + k)?
+                            .iter()
+                            .find(|(key, _)| key == IMAGE_MARK)
+                            .and_then(|(_, v)| as_str(v))?;
+                        self.image(&id)
+                            .is_some()
+                            .then_some(ImageRef { offset: k, id })
+                    })
+                    .collect();
                 SlotFormat {
                     runs: m.slice(slot.offset..end),
                     paragraph,
+                    images,
                 }
             })
             .collect()
@@ -392,7 +411,7 @@ impl Document {
         let Ok(text) = self.container(container) else {
             return ParagraphFormat::default();
         };
-        match holder(&text.to_string(), offset) {
+        match holder(&text.to_string(), offset, &self.table_chars(container)) {
             Holder::Char(i) => {
                 let m = Marks::of(&text);
                 ParagraphFormat::from_attrs(|k| {
@@ -413,7 +432,7 @@ impl Document {
         f: ParagraphFormat,
     ) -> Result<(), ModelError> {
         let text = self.container(container)?;
-        match holder(&text.to_string(), offset) {
+        match holder(&text.to_string(), offset, &self.table_chars(container)) {
             Holder::Char(i) => mark_paragraph(&text, i, f),
             Holder::Tail => {
                 let (map, prefix) = self.tail_map(container)?;
@@ -463,6 +482,14 @@ impl Document {
         Ok(())
     }
 
+    /// Char indices of the table placeholders in a container (only the body holds tables).
+    fn table_chars(&self, container: &TextRef) -> Vec<usize> {
+        match container {
+            TextRef::Body => self.placeholders().into_iter().map(|(i, _)| i).collect(),
+            TextRef::Cell(_) => Vec::new(),
+        }
+    }
+
     fn container_marks(&self, container: &TextRef) -> Option<Marks> {
         match container {
             TextRef::Body => Some(Marks::of(&self.body())),
@@ -499,12 +526,14 @@ impl Document {
 }
 
 /// Where the format of the paragraph containing `offset` lives: the first line break or table
-/// placeholder at or after it, or the container's tail.
-fn holder(text: &str, offset: usize) -> Holder {
+/// placeholder (`tables`: their char indices) at or after it, or the container's tail. Image
+/// placeholders use the same character as tables but sit inside paragraphs, so the character
+/// alone can't tell.
+fn holder(text: &str, offset: usize, tables: &[usize]) -> Holder {
     text.chars()
         .enumerate()
         .skip(offset)
-        .find(|(_, c)| *c == '\n' || *c == TABLE_PLACEHOLDER)
+        .find(|(i, c)| *c == '\n' || tables.contains(i))
         .map_or(Holder::Tail, |(i, _)| Holder::Char(i))
 }
 

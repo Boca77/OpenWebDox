@@ -1,3 +1,5 @@
+import { ImageCache, parseProps, type Look } from "./images.js";
+
 /**
  * What the renderer needs from the layout engine. The wasm `Editor` from `opendox-wasm`
  * implements it; tests can supply a fake.
@@ -13,7 +15,19 @@ export interface LayoutSource {
   units_per_em(font: number, face: number): number;
   /** Table borders on a page, in groups of {@link RULE_STRIDE}. */
   page_rules(index: number): Float32Array;
+  /** Images on a page in drawing order, in groups of {@link OBJECT_STRIDE}. */
+  page_objects(index: number): Float32Array;
+  object_id(key: number): string | undefined;
+  image_data(id: string): Uint8Array;
+  image_mime(id: string): string;
+  image_props(id: string): Float32Array | undefined;
 }
+
+/**
+ * Floats per image: key, layer (0 behind, 1 text, 2 front), bounding box x, y, width, height,
+ * drawn width, drawn height, rotation (degrees clockwise). Points.
+ */
+export const OBJECT_STRIDE = 9;
 
 /** Floats per glyph: font id, face index, glyph id, x, y, font size (positions in points). */
 export const GLYPH_STRIDE = 6;
@@ -48,6 +62,9 @@ export class PageRenderer {
   private readonly paths = new Map<string, Path2D | null>();
   private readonly emSizes = new Map<string, number>();
   private readonly pageEls: HTMLElement[] = [];
+  private readonly images = new ImageCache(() => this.render(this.pageEls.length));
+  /** A look shown instead of an image's stored one, while a slider is being dragged. */
+  lookOverride?: (id: string) => Partial<Look> | undefined;
 
   constructor(
     private readonly source: LayoutSource,
@@ -112,7 +129,10 @@ export class PageRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, widthPx, heightPx);
+    const objects = this.source.page_objects(index);
+    this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 0);
     this.drawRules(ctx, index, devicePerPt);
+    this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 1);
     ctx.fillStyle = INK;
 
     const data = this.source.page_glyphs(index);
@@ -125,8 +145,46 @@ export class PageRenderer {
       ctx.setTransform(k, 0, 0, k, data[i + 3] * devicePerPt, data[i + 4] * devicePerPt);
       ctx.fill(path);
     }
+    this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 2);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     return data.length / GLYPH_STRIDE;
+  }
+
+  /** Images in the given layers: each rotated about the centre of its bounding box. */
+  private drawObjects(
+    ctx: CanvasRenderingContext2D,
+    data: Float32Array,
+    devicePerPt: number,
+    layer: (l: number) => boolean,
+  ): void {
+    for (let i = 0; i < data.length; i += OBJECT_STRIDE) {
+      if (!layer(data[i + 1])) continue;
+      const id = this.source.object_id(data[i]);
+      const raw = id ? this.source.image_props(id) : undefined;
+      if (!id || !raw) continue;
+      const p = { ...parseProps(raw), ...this.lookOverride?.(id) };
+      const [x, y, bw, bh, w, h, rot] = [data[i + 2], data[i + 3], data[i + 4], data[i + 5], data[i + 6], data[i + 7], data[i + 8]];
+      const k = devicePerPt;
+      ctx.setTransform(k, 0, 0, k, (x + bw / 2) * k, (y + bh / 2) * k);
+      ctx.rotate((rot * Math.PI) / 180);
+      const picture = this.images.get(
+        id,
+        () => this.source.image_data(id),
+        () => this.source.image_mime(id),
+        p,
+      );
+      if (picture) {
+        ctx.globalAlpha = Math.max(0, Math.min(1, 1 - p.transparency / 100));
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(picture, -w / 2, -h / 2, w, h);
+        ctx.globalAlpha = 1;
+      } else {
+        // Still decoding: a light placeholder the size of the image.
+        ctx.fillStyle = "#eef0f3";
+        ctx.fillRect(-w / 2, -h / 2, w, h);
+      }
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   /** Table borders, snapped to whole device pixels so thin lines stay crisp. */

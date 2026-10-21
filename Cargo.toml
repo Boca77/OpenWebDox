@@ -27,6 +27,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 pdf-writer = "0.15.0"
 subsetter = "0.2.6"
 miniz_oxide = "0.9.1"
+png = "0.18.1"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 # Reads PDFs back in export tests.
 lopdf = "0.45.0"
 # Same tungstenite version axum uses, so it isn't compiled twice.

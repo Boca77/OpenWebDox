@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use parley::{
-    Alignment, AlignmentOptions, FontStyle, FontWeight, LayoutContext, LineHeight, OverflowWrap,
-    PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontStyle, FontWeight, InlineBox, InlineBoxKind, LayoutContext,
+    LineHeight, OverflowWrap, PositionedLayoutItem, StyleProperty, VerticalAlign, YieldData,
 };
 
 use crate::fonts::{FontId, FontLibrary};
@@ -61,6 +61,73 @@ pub struct StyleSpan {
     pub style: TextStyle,
 }
 
+/// The character standing in for an object (an image) in paragraph text.
+pub const OBJECT_PLACEHOLDER: char = '\u{FFFC}';
+
+/// How an object sits among the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ObjectMode {
+    /// In the line like a large character; the line grows to fit it.
+    #[default]
+    Inline,
+    /// Positioned on the page; lines beside it get shorter so text flows around it.
+    Wrap,
+    /// Positioned on lines of its own, before the line holding its placeholder.
+    Break,
+    /// Positioned on the page under the text, which ignores it.
+    Behind,
+    /// Positioned on the page over the text, which ignores it.
+    Front,
+}
+
+/// An object (an image) anchored in a paragraph. Lengths in points.
+///
+/// Its placeholder character stays in the text and keeps its byte offsets, but takes no width
+/// and draws nothing; an in-line object takes its place in the line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObjectInput {
+    /// UTF-8 byte offset of the object's [`OBJECT_PLACEHOLDER`] in the paragraph text.
+    pub byte: usize,
+    /// Any number the caller wants back in [`crate::PlacedObject::key`].
+    pub key: usize,
+    /// Size before rotation.
+    pub width: f32,
+    pub height: f32,
+    /// Degrees clockwise. Layout makes room for the rotated bounding box.
+    pub rotation: f32,
+    pub mode: ObjectMode,
+    /// For objects positioned on the page: where the top-left corner of the bounding box goes,
+    /// from the left margin and from the top of the paragraph. `Break` uses only `x`.
+    pub x: f32,
+    pub y: f32,
+}
+
+impl ObjectInput {
+    /// Width and height of the rotated bounding box: the space the object takes.
+    pub fn footprint(&self) -> (f32, f32) {
+        let r = self.rotation.to_radians();
+        let (s, c) = (r.sin().abs(), r.cos().abs());
+        (
+            self.width * c + self.height * s,
+            self.width * s + self.height * c,
+        )
+    }
+}
+
+/// A rectangle a paragraph's lines must keep clear of (a wrapped image plus its margin), in
+/// the paragraph's coordinates: y from the paragraph's top, x from its left edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Exclusion {
+    pub top: f32,
+    pub bottom: f32,
+    pub left: f32,
+    pub right: f32,
+}
+
+/// The narrowest piece of line text is put on beside a wrapped object. Narrower than this,
+/// the line moves below the object instead.
+pub const MIN_WRAP_WIDTH: f32 = 36.0;
+
 /// One paragraph broken into lines. Coordinates are in points, relative to the paragraph's
 /// top-left corner.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +142,7 @@ pub struct ParagraphLayout {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
     pub byte_range: Range<usize>,
+    /// Lines are stacked without gaps, except where a line moved below an exclusion.
     pub top: f32,
     pub bottom: f32,
     /// Y of the baseline glyphs sit on.
@@ -85,6 +153,19 @@ pub struct Line {
     pub runs: Vec<GlyphRun>,
     /// Every place a caret can sit on this line, left to right. Never empty.
     pub carets: Vec<CaretStop>,
+    /// In-line objects on this line, left to right.
+    pub objects: Vec<LineObject>,
+}
+
+/// An in-line object on a line: its bounding box, in paragraph coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineObject {
+    /// Index into the paragraph's objects.
+    pub object: usize,
+    pub x: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// A caret position on a line: a grapheme boundary and its x coordinate.
@@ -189,6 +270,48 @@ impl LayoutEngine {
         para: &ParagraphStyle,
         width: f32,
     ) -> ParagraphLayout {
+        self.layout_paragraph_with(text, base, spans, para, width, &[], &[])
+    }
+
+    /// [`LayoutEngine::layout_paragraph_styled`] with objects (images) in the text, and areas
+    /// the lines must keep clear of. A line beside exclusions uses the widest gap they leave;
+    /// if no gap is at least [`MIN_WRAP_WIDTH`] wide, the line moves below them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_paragraph_with(
+        &mut self,
+        text: &str,
+        base: &TextStyle,
+        spans: &[StyleSpan],
+        para: &ParagraphStyle,
+        width: f32,
+        objects: &[ObjectInput],
+        exclusions: &[Exclusion],
+    ) -> ParagraphLayout {
+        // Objects whose byte really holds a placeholder, with their index in `objects`.
+        let objects: Vec<(usize, &ObjectInput)> = objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| {
+                text.get(o.byte..)
+                    .is_some_and(|t| t.starts_with(OBJECT_PLACEHOLDER))
+            })
+            .collect();
+        // Placeholders keep their bytes but become zero-width spaces: the same length in
+        // UTF-8 (3 bytes), no ink, and a break opportunity after an object.
+        let swapped: String;
+        let text = if objects.is_empty() {
+            text
+        } else {
+            let mut s = String::with_capacity(text.len());
+            for (i, c) in text.char_indices() {
+                let object = c == OBJECT_PLACEHOLDER && objects.iter().any(|(_, o)| o.byte == i);
+                s.push(if object { '\u{200B}' } else { c });
+            }
+            swapped = s;
+            swapped.as_str()
+        };
+        let placeholders: Vec<usize> = objects.iter().map(|(_, o)| o.byte).collect();
+
         // Quantization off: snapping metrics to whole units would round 16.34pt lines to 17pt
         // and drift page breaks.
         let mut b = self.cx.ranged_builder(&mut self.fonts.cx, text, 1.0, false);
@@ -200,8 +323,28 @@ impl LayoutEngine {
         for span in spans {
             push_style(&mut b, &span.style, span.byte_range.clone());
         }
+        for (i, o) in &objects {
+            if o.mode != ObjectMode::Inline {
+                continue;
+            }
+            let (w, h) = inline_size(o, width);
+            b.push_inline_box(InlineBox {
+                id: *i as u64,
+                kind: InlineBoxKind::InFlow,
+                index: o.byte,
+                width: w,
+                height: h,
+                baseline: None,
+                vertical_align: VerticalAlign::BASELINE,
+            });
+        }
         let mut layout = b.build(text);
-        layout.break_all_lines(Some(width));
+        if exclusions.is_empty() {
+            layout.break_all_lines(Some(width));
+        } else {
+            let guess = base.font_size * 1.4 * para.line_spacing;
+            break_around(&mut layout, width, guess, exclusions);
+        }
         let alignment = match para.align {
             // Start, not Left: right-to-left paragraphs start on the right.
             Align::Left => Alignment::Start,
@@ -209,18 +352,28 @@ impl LayoutEngine {
             Align::Right => Alignment::End,
             Align::Justify => Alignment::Justify,
         };
-        // Aligns within the break width (`width`), not the widest line.
+        // Aligns each line within its own break width (`width`, or what exclusions left).
         layout.align(alignment, AlignmentOptions::default());
 
         let lines: Vec<Line> = layout
             .lines()
             .map(|line| {
                 let m = line.metrics();
+                let mut boxes: Vec<LineObject> = Vec::new();
                 let runs = line
                     .items()
                     .filter_map(|item| match item {
                         PositionedLayoutItem::GlyphRun(g) => Some(g),
-                        PositionedLayoutItem::InlineBox(_) => None,
+                        PositionedLayoutItem::InlineBox(b) => {
+                            boxes.push(LineObject {
+                                object: b.id as usize,
+                                x: b.x,
+                                top: b.y,
+                                width: b.width,
+                                height: b.height,
+                            });
+                            None
+                        }
                     })
                     .filter_map(|g| {
                         let run = g.run();
@@ -228,7 +381,7 @@ impl LayoutEngine {
                         // Every font parley can pick came from our library, so this lookup only
                         // fails if that invariant breaks; skip the run rather than crash.
                         let id = self.fonts.id_of(&font.data)?;
-                        let glyphs: Vec<Glyph> = g
+                        let all: Vec<Glyph> = g
                             .positioned_glyphs()
                             .map(|gl| Glyph {
                                 id: gl.id,
@@ -236,8 +389,14 @@ impl LayoutEngine {
                                 y: gl.y,
                             })
                             .collect();
-                        let glyph_text = glyph_text(run, glyphs.len());
-                        Some(GlyphRun {
+                        let texts = glyph_text(run, all.len());
+                        // Placeholders draw nothing, whatever glyph the font gave them.
+                        let (glyphs, glyph_text): (Vec<Glyph>, Vec<Range<usize>>) = all
+                            .into_iter()
+                            .zip(texts)
+                            .filter(|(_, t)| !placeholders.contains(&t.start))
+                            .unzip();
+                        (!glyphs.is_empty()).then(|| GlyphRun {
                             font: id,
                             face_index: font.index,
                             font_size: run.font_size(),
@@ -248,6 +407,14 @@ impl LayoutEngine {
                         })
                     })
                     .collect();
+                let box_stops: Vec<(usize, f32, f32)> = boxes
+                    .iter()
+                    .filter_map(|b| Some((objects.get(b.object)?.1.byte, b.x, b.width)))
+                    .collect();
+                // Parley numbered boxes in push order; callers know objects by their index.
+                for b in &mut boxes {
+                    b.object = objects.get(b.object).map_or(usize::MAX, |(i, _)| *i);
+                }
                 Line {
                     byte_range: line.text_range(),
                     top: m.block_min_coord,
@@ -255,7 +422,8 @@ impl LayoutEngine {
                     baseline: m.baseline,
                     advance: m.advance,
                     runs,
-                    carets: caret_stops(&line),
+                    carets: caret_stops(&line, &box_stops, &placeholders),
+                    objects: boxes,
                 }
             })
             .collect();
@@ -266,6 +434,119 @@ impl LayoutEngine {
             lines,
         }
     }
+}
+
+/// The box an in-line object takes on its line: its bounding box, scaled down to the line
+/// width if wider, since an object that can't fit would overflow the page.
+pub fn inline_size(o: &ObjectInput, line_width: f32) -> (f32, f32) {
+    let (w, h) = o.footprint();
+    let k = if w > line_width && w > 0.0 {
+        line_width / w
+    } else {
+        1.0
+    };
+    (w * k, h * k)
+}
+
+/// Breaks lines one at a time, giving each line the horizontal gap the exclusions leave at its
+/// height. A line's height is only known once it's broken, so each line is first broken with
+/// the previous line's height as a guess and broken again if its real extent meets different
+/// exclusions.
+fn break_around(
+    layout: &mut parley::Layout<()>,
+    width: f32,
+    first_guess: f32,
+    exclusions: &[Exclusion],
+) {
+    fn place(lines: &mut parley::BreakLines<'_, ()>, (x, w): (f32, f32)) {
+        let st = lines.state_mut();
+        st.set_line_x(x);
+        st.set_line_max_advance(w);
+    }
+    let mut lines = layout.break_lines();
+    lines.state_mut().set_layout_max_advance(width);
+    let mut guess = first_guess;
+    // Bounded: every pass commits a line or moves the next line's top down past an exclusion.
+    for _ in 0..10_000 {
+        let y = lines.committed_y() as f32;
+        let span = match free_span(y, y + guess, width, exclusions) {
+            Span::Below(bottom) => {
+                lines.state_mut().set_line_y(f64::from(bottom));
+                continue;
+            }
+            Span::At(x, w) => (x, w),
+        };
+        place(&mut lines, span);
+        let Some(data) = lines.break_next() else {
+            break;
+        };
+        let YieldData::LineBreak(d) = data else {
+            continue;
+        };
+        let (top, bottom) = (d.line_y_start as f32, d.line_y_end as f32);
+        guess = (bottom - top).max(1.0);
+        match free_span(top, bottom, width, exclusions) {
+            Span::At(x, w) if (x, w) == span => {}
+            Span::At(x, w) => {
+                // Broken once more with the gap at its real height, and kept either way.
+                if lines.revert() {
+                    place(&mut lines, (x, w));
+                    if lines.break_next().is_none() {
+                        break;
+                    }
+                }
+            }
+            Span::Below(b) => {
+                if lines.revert() {
+                    lines.state_mut().set_line_y(f64::from(b));
+                }
+            }
+        }
+        if lines.is_done() {
+            break;
+        }
+    }
+    lines.finish();
+}
+
+enum Span {
+    /// The line goes at this x with this much width.
+    At(f32, f32),
+    /// No gap is wide enough: the line moves down to this y.
+    Below(f32),
+}
+
+/// The widest stretch of `0..width` that no exclusion covers between `top` and `bottom`.
+fn free_span(top: f32, bottom: f32, width: f32, exclusions: &[Exclusion]) -> Span {
+    let hits: Vec<&Exclusion> = exclusions
+        .iter()
+        .filter(|e| top < e.bottom && bottom > e.top && e.left < width && e.right > 0.0)
+        .collect();
+    if hits.is_empty() {
+        return Span::At(0.0, width);
+    }
+    let mut blocked: Vec<(f32, f32)> = hits
+        .iter()
+        .map(|e| (e.left.max(0.0), e.right.min(width)))
+        .collect();
+    blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut best = (0.0f32, 0.0f32);
+    let mut x = 0.0f32;
+    for (l, r) in blocked {
+        if l - x > best.1 {
+            best = (x, l - x);
+        }
+        x = x.max(r);
+    }
+    if width - x > best.1 {
+        best = (x, width - x);
+    }
+    if best.1 >= MIN_WRAP_WIDTH {
+        return Span::At(best.0, best.1);
+    }
+    let lowest = hits.iter().map(|e| e.bottom).fold(f32::INFINITY, f32::min);
+    // Never stay put: that would retry the same line forever.
+    Span::Below(lowest.max(top + 0.01))
 }
 
 /// The text each glyph of `run` draws, in the visual order parley positions glyphs in.
@@ -327,16 +608,34 @@ fn font_style(s: &TextStyle) -> FontStyle {
 }
 
 /// Walks the line's clusters in visual order, recording the offset at each cluster edge.
-fn caret_stops(line: &parley::Line<'_, ()>) -> Vec<CaretStop> {
-    let mut stops: Vec<CaretStop> = Vec::new();
-    let mut x = line.metrics().offset;
-    let mut push = |byte: usize, x: f32| {
+///
+/// `boxes` are the line's in-line objects as `(placeholder byte, x, width)`: the caret before
+/// one sits at its left edge and the caret after it at its right edge. `placeholders` holds the
+/// byte of every object placeholder; they take no width of their own.
+fn caret_stops(
+    line: &parley::Line<'_, ()>,
+    boxes: &[(usize, f32, f32)],
+    placeholders: &[usize],
+) -> Vec<CaretStop> {
+    let start_x = line.metrics().offset + line.metrics().inline_min_coord;
+    fn push(stops: &mut Vec<CaretStop>, byte: usize, x: f32) {
         if stops.last().is_none_or(|s| s.byte != byte || s.x != x) {
             stops.push(CaretStop { byte, x });
         }
-    };
+    }
+    let mut stops: Vec<CaretStop> = Vec::new();
+    let after = |byte: usize| byte + OBJECT_PLACEHOLDER.len_utf8();
+    let mut pending: Vec<&(usize, f32, f32)> = boxes.iter().collect();
+    let mut x = start_x;
     for run in line.runs() {
         for cluster in run.visual_clusters() {
+            // Objects sit between clusters: step over any box that starts here.
+            while let Some(k) = pending.iter().position(|b| b.1 <= x + 0.01) {
+                let (byte, bx, w) = *pending.remove(k);
+                push(&mut stops, byte, bx);
+                x = bx + w;
+                push(&mut stops, after(byte), x);
+            }
             let r = cluster.text_range();
             let right = x + cluster.advance();
             // A right-to-left cluster starts (logically) at its right edge.
@@ -345,15 +644,26 @@ fn caret_stops(line: &parley::Line<'_, ()>) -> Vec<CaretStop> {
             } else {
                 (r.start, r.end)
             };
-            push(left_byte, x);
-            push(right_byte, right);
+            // An in-line object's placeholder already has both its stops from the box.
+            if !boxes.iter().any(|b| b.0 == r.start) {
+                // A placeholder takes no width, so its left edge would tie with its right
+                // one; keeping only the right makes clicks there land after it.
+                if !placeholders.contains(&r.start) {
+                    push(&mut stops, left_byte, x);
+                }
+                push(&mut stops, right_byte, right);
+            }
             x = right;
         }
+    }
+    for (byte, bx, w) in pending {
+        push(&mut stops, *byte, *bx);
+        push(&mut stops, after(*byte), bx + w);
     }
     if stops.is_empty() {
         stops.push(CaretStop {
             byte: line.text_range().start,
-            x: line.metrics().offset,
+            x: start_x,
         });
     }
     stops

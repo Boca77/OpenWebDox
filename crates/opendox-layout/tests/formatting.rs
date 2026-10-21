@@ -181,6 +181,7 @@ fn para<'a>(text: &'a str, base: &'a TextStyle, before: f32, after: f32) -> Para
             space_after: after,
             ..ParagraphStyle::default()
         },
+        objects: &[],
     }
 }
 

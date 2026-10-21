@@ -278,6 +278,299 @@
       .opendox-page {
         box-shadow: var(--page-shadow);
       }
+      /* Images: the bar under a selected image, its wrap menu, and the options panel. */
+      #image-bar {
+        position: fixed;
+        z-index: 4;
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 4px;
+        background: var(--surface);
+        border-radius: 8px;
+        box-shadow: var(--menu-shadow);
+      }
+      #image-bar[hidden],
+      #wrap-menu[hidden],
+      #image-panel[hidden],
+      #panel-body[hidden],
+      #panel-empty[hidden] {
+        display: none;
+      }
+      #image-bar .tool {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+      #image-bar .sep {
+        width: 1px;
+        height: 24px;
+        margin: 0 4px;
+        background: var(--hairline);
+      }
+      .wrap-wrap {
+        position: relative;
+      }
+      #image-bar svg,
+      #wrap-menu svg,
+      .wrap-choice svg {
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.6;
+        stroke-linecap: round;
+      }
+      svg .fill {
+        fill: currentColor;
+        stroke: none;
+      }
+      svg .fill.soft {
+        opacity: 0.35;
+      }
+      #wrap-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        min-width: 220px;
+        margin: 0;
+        padding: 4px;
+        list-style: none;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #wrap-menu button {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 0 10px;
+        text-align: left;
+        background: transparent;
+        border: 0;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #wrap-menu button span {
+        flex: 1;
+      }
+      #wrap-menu button .check {
+        visibility: hidden;
+        stroke-width: 2;
+      }
+      #wrap-menu button[aria-checked="true"] {
+        background: var(--accent-soft);
+        font-weight: 600;
+      }
+      #wrap-menu button[aria-checked="true"] .check {
+        visibility: visible;
+      }
+      #wrap-menu button:hover,
+      #wrap-menu button:focus-visible {
+        background: var(--accent-soft);
+        outline: none;
+      }
+      #wrap-menu button:disabled {
+        color: var(--text-muted);
+        opacity: 0.6;
+        cursor: default;
+      }
+
+      #image-panel {
+        position: fixed;
+        z-index: 2;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(320px, 100vw);
+        overflow-y: auto;
+        background: var(--bar-bg);
+        border-left: 1px solid var(--hairline);
+        box-shadow: -2px 0 8px rgb(40 48 64 / 0.08);
+      }
+      body.panel-open #pages {
+        padding-right: 336px;
+      }
+      #image-panel > header {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        justify-content: space-between;
+        padding: 0 4px 0 16px;
+        border-bottom: 1px solid var(--hairline);
+      }
+      #image-panel h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      #panel-empty {
+        margin: 16px;
+        color: var(--text-muted);
+      }
+      #image-panel details {
+        border-bottom: 1px solid var(--hairline);
+      }
+      #image-panel summary {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 44px;
+        padding: 0 16px;
+        font-weight: 600;
+        cursor: pointer;
+        list-style: none;
+      }
+      #image-panel summary::-webkit-details-marker {
+        display: none;
+      }
+      #image-panel summary::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-right: 1.6px solid currentColor;
+        border-bottom: 1.6px solid currentColor;
+        transform: rotate(-45deg);
+        transition: transform 120ms cubic-bezier(0.2, 0, 0, 1);
+      }
+      #image-panel details[open] > summary::before {
+        transform: rotate(45deg);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #image-panel summary::before {
+          transition: none;
+        }
+      }
+      #image-panel summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+      .section {
+        display: grid;
+        gap: 10px;
+        padding: 4px 16px 16px;
+      }
+      .row {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+      }
+      .row > label {
+        flex: 1;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 2px;
+      }
+      .row .unit {
+        padding-bottom: 9px;
+      }
+      .section input[type="number"],
+      .section textarea {
+        min-height: 36px;
+        width: 100%;
+        padding: 4px 8px;
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+      }
+      .section input:disabled {
+        color: var(--text-muted);
+        background: transparent;
+      }
+      .section textarea {
+        min-height: 72px;
+        resize: vertical;
+      }
+      .section input:focus-visible,
+      .section textarea:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 0;
+      }
+      .section .unit,
+      .section .note {
+        margin: 0;
+        color: var(--text-muted);
+      }
+      .check-row {
+        min-height: 44px;
+        color: var(--text);
+      }
+      #img-wraps {
+        display: grid;
+        gap: 2px;
+      }
+      .wrap-choice,
+      .recolor-choice {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 44px;
+        padding: 0 10px;
+        text-align: left;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .wrap-choice:hover,
+      .recolor-choice:hover {
+        background: var(--surface);
+        border-color: var(--hairline);
+      }
+      .wrap-choice[aria-pressed="true"],
+      .recolor-choice[aria-pressed="true"] {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      .wrap-choice:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #recolors {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      .recolor-choice .swatch {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        border-radius: 3px;
+        box-shadow: inset 0 0 0 1px rgb(29 33 41 / 0.2);
+      }
+      .slider {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 2px 8px;
+        color: var(--text);
+      }
+      .slider input {
+        grid-column: 1 / -1;
+        width: 100%;
+        min-height: 32px;
+        accent-color: var(--accent);
+      }
+      .slider output {
+        font-variant-numeric: tabular-nums;
+        color: var(--text-muted);
+      }
+      .text-button {
+        justify-self: start;
+        min-height: 36px;
+        padding: 0 12px;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .text-button:hover {
+        border-color: var(--text-muted);
+      }
+
       #error {
         margin: 16px;
         color: #9b1c1c;
@@ -310,6 +603,8 @@
             <p id="size" aria-live="polite">1 × 1</p>
           </div>
         </div>
+        <button id="insert-image" class="tool">Insert image</button>
+        <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" hidden />
         <button id="export-pdf" class="tool">Download PDF</button>
         <button id="export-docx" class="tool">Download .docx</button>
         <label>
@@ -395,6 +690,92 @@
       <li role="none"><button role="menuitem" data-cmd="deleteColumn">Delete column</button></li>
       <li role="none"><button role="menuitem" data-cmd="deleteTable">Delete table</button></li>
     </ul>
+    <div id="image-bar" role="toolbar" aria-label="Image" hidden>
+      <div class="wrap-wrap">
+        <button id="wrap-trigger" class="tool" aria-haspopup="menu" aria-expanded="false" aria-controls="wrap-menu" title="Text wrapping">
+          <span class="current"></span>
+          <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M6 8l4 4 4-4" /></svg>
+        </button>
+        <ul id="wrap-menu" role="menu" aria-label="Text wrapping" hidden></ul>
+      </div>
+      <span class="sep" aria-hidden="true"></span>
+      <button id="image-options" class="tool" aria-expanded="false" aria-controls="image-panel">Image options</button>
+      <button id="image-delete" class="tool" title="Delete (Del)">Delete</button>
+    </div>
+    <aside id="image-panel" aria-label="Image options" hidden>
+      <header>
+        <h2>Image options</h2>
+        <button id="panel-close" class="tool icon" aria-label="Close image options">
+          <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
+        </button>
+      </header>
+      <p id="panel-empty">Select an image to change it.</p>
+      <div id="panel-body">
+        <details open>
+          <summary>Size &amp; rotation</summary>
+          <div class="section">
+            <div class="row">
+              <label class="field-label">Width <input id="img-width" type="number" min="0.05" step="0.05" /></label>
+              <label class="field-label">Height <input id="img-height" type="number" min="0.05" step="0.05" /></label>
+              <span class="unit">in</span>
+            </div>
+            <label class="check-row"><input id="img-lock" type="checkbox" checked /> Lock aspect ratio</label>
+            <div class="row">
+              <label class="field-label">Scale <input id="img-scale" type="number" min="1" step="5" /></label>
+              <span class="unit">% of original</span>
+            </div>
+            <button id="img-reset-size" class="text-button" type="button">Original size</button>
+            <div class="row">
+              <label class="field-label">Angle <input id="img-rotation" type="number" step="1" /></label>
+              <span class="unit">°</span>
+              <button id="img-rotate-90" class="text-button" type="button">Rotate 90°</button>
+            </div>
+          </div>
+        </details>
+        <details>
+          <summary>Text wrapping</summary>
+          <div class="section"><div id="img-wraps" role="group" aria-label="Text wrapping"></div></div>
+        </details>
+        <details>
+          <summary>Position</summary>
+          <div id="position-section" class="section">
+            <div class="row">
+              <label class="field-label">X <input id="img-x" type="number" step="0.05" /></label>
+              <label class="field-label">Y <input id="img-y" type="number" step="0.05" /></label>
+              <span class="unit">in</span>
+            </div>
+            <p id="position-note" class="note"></p>
+          </div>
+        </details>
+        <details>
+          <summary>Recolor</summary>
+          <div class="section">
+            <div id="recolors" role="group" aria-label="Recolor">
+              <button type="button" class="recolor-choice" data-recolor="none"><span class="swatch" style="background: linear-gradient(135deg, #4f8bd6, #e2a33b)"></span>No recolor</button>
+              <button type="button" class="recolor-choice" data-recolor="grayscale"><span class="swatch" style="background: linear-gradient(135deg, #7b7b7b, #c4c4c4)"></span>Grayscale</button>
+              <button type="button" class="recolor-choice" data-recolor="sepia"><span class="swatch" style="background: linear-gradient(135deg, #8a6d4b, #d9c3a5)"></span>Sepia</button>
+              <button type="button" class="recolor-choice" data-recolor="negative"><span class="swatch" style="background: linear-gradient(135deg, #b0742c, #1d5cc4)"></span>Negative</button>
+            </div>
+          </div>
+        </details>
+        <details>
+          <summary>Adjustments</summary>
+          <div class="section">
+            <label class="slider">Transparency <output id="img-transparency-out">0</output><input id="img-transparency" type="range" min="0" max="100" step="1" /></label>
+            <label class="slider">Brightness <output id="img-brightness-out">0</output><input id="img-brightness" type="range" min="-100" max="100" step="1" /></label>
+            <label class="slider">Contrast <output id="img-contrast-out">0</output><input id="img-contrast" type="range" min="-100" max="100" step="1" /></label>
+            <button id="img-reset-adjust" class="text-button" type="button">Reset</button>
+          </div>
+        </details>
+        <details>
+          <summary>Alt text</summary>
+          <div class="section">
+            <label class="field-label" for="img-alt">Description</label>
+            <textarea id="img-alt" placeholder="What the image shows, for people who can't see it"></textarea>
+          </div>
+        </details>
+      </div>
+    </aside>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

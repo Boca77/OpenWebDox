@@ -18,6 +18,9 @@ pub enum ModelError {
     #[error("no such table cell")]
     NoSuchCell,
 
+    #[error("no such image")]
+    NoSuchImage,
+
     #[error("a table needs at least one row and one column")]
     InvalidTable,
 

@@ -1,13 +1,28 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use crate::fonts::FontId;
 use crate::navigation::{PlacedLine, Rect};
-use crate::paragraph::{LayoutEngine, ParagraphLayout, ParagraphStyle, StyleSpan, TextStyle};
+use crate::paragraph::{
+    Exclusion, LayoutEngine, Line, ObjectInput, ObjectMode, ParagraphLayout, ParagraphStyle,
+    StyleSpan, TextStyle,
+};
 
 /// Space between a cell's border and its text, in points.
 pub const CELL_PADDING: f32 = 5.0;
+
+/// Space kept between a wrapped object and the text beside it, in points (1/8 in, as in
+/// Google Docs).
+pub const WRAP_MARGIN: f32 = 9.0;
+
+/// Space above and below an object that breaks text, in points.
+pub const BREAK_MARGIN: f32 = 9.0;
+
+/// How many times a layout is redone so text settles around wrapped objects. Each pass lays
+/// text around the objects where the previous pass put them; documents without wrapped
+/// objects take one pass.
+const MAX_WRAP_PASSES: usize = 5;
 
 /// Page size and margins, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +74,9 @@ pub struct ParagraphInput<'a> {
     pub spans: &'a [StyleSpan],
     /// Alignment, line spacing and the space around the paragraph.
     pub style: ParagraphStyle,
+    /// Objects (images) anchored in the paragraph. In table cells every object is laid out in
+    /// line, whatever its mode.
+    pub objects: &'a [ObjectInput],
 }
 
 /// A table as input to pagination: rows of cells, each cell a list of paragraphs. Columns
@@ -75,11 +93,42 @@ pub enum BlockInput<'a> {
     Table(TableInput<'a>),
 }
 
-/// A page: the pieces of paragraphs placed on it, and the table borders to draw.
-#[derive(Debug, Clone, PartialEq)]
+/// A page: the pieces of paragraphs placed on it, the table borders and the objects to draw.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Page {
     pub fragments: Vec<Fragment>,
     pub rules: Vec<Rule>,
+    pub objects: Vec<PlacedObject>,
+}
+
+/// Where an object is drawn relative to the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Layer {
+    Behind,
+    /// Among the text: in-line, wrapped and text-breaking objects, which never overlap it.
+    Text,
+    Front,
+}
+
+/// An object placed on a page. Points from the page's top-left corner.
+///
+/// To draw it: rotate a `width` x `height` box by `rotation` about the centre of `bounds`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedObject {
+    /// The caller's [`ObjectInput::key`].
+    pub key: usize,
+    pub paragraph: usize,
+    /// Index into the paragraph's objects.
+    pub object: usize,
+    pub layer: Layer,
+    /// The space the object takes: its rotated bounding box.
+    pub bounds: Rect,
+    /// Drawn size before rotation (smaller than asked for if an in-line object had to shrink
+    /// to fit its line).
+    pub width: f32,
+    pub height: f32,
+    /// Degrees clockwise.
+    pub rotation: f32,
 }
 
 /// The lines of one paragraph that landed on one page.
@@ -141,6 +190,10 @@ pub struct Paginator {
     keys: Vec<u64>,
     /// Each paragraph's style from the last call, for spacing while stacking.
     styles: Vec<ParagraphStyle>,
+    /// Each paragraph's objects from the last call (forced in line in table cells).
+    objects: Vec<Vec<ObjectInput>>,
+    /// Whether each paragraph is in a table cell.
+    in_cell: Vec<bool>,
     plan: Vec<Plan>,
     pages: Vec<Page>,
     /// Every line in document order with its page position; navigation walks this.
@@ -157,6 +210,8 @@ impl Paginator {
             cache: HashMap::new(),
             keys: Vec::new(),
             styles: Vec::new(),
+            objects: Vec::new(),
+            in_cell: Vec::new(),
             plan: Vec::new(),
             pages: Vec::new(),
             lines: Vec::new(),
@@ -198,57 +253,90 @@ impl Paginator {
         // Number every paragraph in reading order and note the width it's laid out at.
         let mut inputs: Vec<(ParagraphInput, f32)> = Vec::new();
         self.plan.clear();
+        self.objects.clear();
+        self.in_cell.clear();
         for block in blocks {
             match block {
                 BlockInput::Paragraph(p) => {
                     inputs.push((*p, content));
+                    self.objects.push(p.objects.to_vec());
+                    self.in_cell.push(false);
                     self.plan.push(Plan::Paragraph(inputs.len() - 1));
                 }
                 BlockInput::Table(t) => {
                     let cols = column_count(t);
                     let width = cell_text_width(content, cols);
-                    let rows = t
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            row.iter()
-                                .take(cols)
-                                .map(|cell| {
-                                    let start = inputs.len();
-                                    inputs.extend(cell.iter().map(|p| (*p, width)));
-                                    start..inputs.len()
-                                })
-                                .collect()
-                        })
-                        .collect();
+                    let mut rows = Vec::with_capacity(t.rows.len());
+                    for row in &t.rows {
+                        let mut cells = Vec::with_capacity(cols);
+                        for cell in row.iter().take(cols) {
+                            let start = inputs.len();
+                            for p in cell {
+                                inputs.push((*p, width));
+                                let inline = p.objects.iter().map(|o| ObjectInput {
+                                    mode: ObjectMode::Inline,
+                                    ..*o
+                                });
+                                self.objects.push(inline.collect());
+                                self.in_cell.push(true);
+                            }
+                            cells.push(start..inputs.len());
+                        }
+                        rows.push(cells);
+                    }
                     self.plan.push(Plan::Table(rows));
                 }
             }
         }
-
-        let mut fresh = HashMap::with_capacity(inputs.len());
-        self.keys.clear();
-        self.styles.clear();
+        self.styles = inputs.iter().map(|(p, _)| p.style).collect();
         self.last_shaped = 0;
-        for (p, width) in &inputs {
-            let key = cache_key(p, *width);
-            self.keys.push(key);
-            self.styles.push(p.style);
-            if fresh.contains_key(&key) {
-                continue;
-            }
-            let layout = match self.cache.remove(&key) {
-                Some(l) => l,
-                None => {
-                    self.last_shaped += 1;
-                    engine.layout_paragraph_styled(p.text, p.base, p.spans, &p.style, *width)
+
+        let mut old = std::mem::take(&mut self.cache);
+        let mut fresh: HashMap<u64, ParagraphLayout> = HashMap::with_capacity(inputs.len());
+        let mut exclusions: Vec<Vec<Exclusion>> = vec![Vec::new(); inputs.len()];
+        let mut pass = 0;
+        let stacked = loop {
+            self.keys.clear();
+            for (i, (p, width)) in inputs.iter().enumerate() {
+                let objects = &self.objects[i];
+                let key = cache_key(p, *width, objects, &exclusions[i]);
+                self.keys.push(key);
+                if fresh.contains_key(&key) {
+                    continue;
                 }
-            };
-            fresh.insert(key, layout);
-        }
-        // Dropping entries not used this pass keeps memory proportional to the document.
-        self.cache = fresh;
-        let stacked = self.stack();
+                let layout = match old.remove(&key) {
+                    Some(l) => l,
+                    None => {
+                        self.last_shaped += 1;
+                        engine.layout_paragraph_with(
+                            p.text,
+                            p.base,
+                            p.spans,
+                            &p.style,
+                            *width,
+                            objects,
+                            &exclusions[i],
+                        )
+                    }
+                };
+                fresh.insert(key, layout);
+            }
+            self.cache = fresh;
+            let stacked = self.stack();
+            pass += 1;
+            if stacked.wraps.is_empty() || pass >= MAX_WRAP_PASSES {
+                break stacked;
+            }
+            let next = self.exclusions(&stacked);
+            if next == exclusions {
+                break stacked;
+            }
+            exclusions = next;
+            fresh = std::mem::take(&mut self.cache);
+        };
+        // Dropping entries not used this call keeps memory proportional to the document.
+        let used: HashSet<u64> = self.keys.iter().copied().collect();
+        self.cache.retain(|k, _| used.contains(k));
         self.pages = stacked.pages;
         self.lines = stacked.lines;
         self.first_line = stacked.first_line;
@@ -304,12 +392,10 @@ impl Paginator {
         let g = self.geometry;
         let mut s = Stacker {
             out: Stacked {
-                pages: vec![Page {
-                    fragments: Vec::new(),
-                    rules: Vec::new(),
-                }],
+                pages: vec![Page::default()],
                 lines: Vec::new(),
                 first_line: vec![0; self.keys.len()],
+                wraps: Vec::new(),
             },
             y: g.margin_top,
             g,
@@ -320,10 +406,104 @@ impl Paginator {
                 Plan::Table(rows) => self.stack_table(&mut s, rows),
             }
         }
+        self.place_inline_objects(&mut s.out.pages);
         s.out
     }
 
-    /// Places a body paragraph line by line, breaking pages between lines.
+    /// Adds every in-line object to its page, where its line was placed.
+    fn place_inline_objects(&self, pages: &mut [Page]) {
+        for page in pages {
+            let mut found = Vec::new();
+            for f in &page.fragments {
+                let Some(para) = self.paragraph(f.paragraph) else {
+                    continue;
+                };
+                let Some(first) = para.lines.get(f.lines.start) else {
+                    continue;
+                };
+                let dy = f.top - first.top;
+                for line in &para.lines[f.lines.clone()] {
+                    for b in &line.objects {
+                        let Some(o) = self.objects.get(f.paragraph).and_then(|v| v.get(b.object))
+                        else {
+                            continue;
+                        };
+                        let (fw, _) = o.footprint();
+                        let k = if fw > 0.0 { b.width / fw } else { 1.0 };
+                        found.push(PlacedObject {
+                            key: o.key,
+                            paragraph: f.paragraph,
+                            object: b.object,
+                            layer: Layer::Text,
+                            bounds: Rect {
+                                x: f.left + b.x,
+                                y: dy + b.top,
+                                width: b.width,
+                                height: b.height,
+                            },
+                            width: o.width * k,
+                            height: o.height * k,
+                            rotation: o.rotation,
+                        });
+                    }
+                }
+            }
+            page.objects.extend(found);
+        }
+    }
+
+    /// Where each body paragraph's lines must keep clear of wrapped objects, given where the
+    /// last stacking put everything: each wrapped object (plus margin) on a page, in the
+    /// coordinates of every paragraph piece on that page.
+    fn exclusions(&self, stacked: &Stacked) -> Vec<Vec<Exclusion>> {
+        let mut out = vec![Vec::new(); self.keys.len()];
+        for (p, page) in stacked.pages.iter().enumerate() {
+            let wraps: Vec<&Rect> = stacked
+                .wraps
+                .iter()
+                .filter(|(q, _)| *q == p)
+                .map(|(_, r)| r)
+                .collect();
+            if wraps.is_empty() {
+                continue;
+            }
+            for f in &page.fragments {
+                if self.in_cell.get(f.paragraph).copied().unwrap_or(true) {
+                    continue;
+                }
+                let Some(para) = self.paragraph(f.paragraph) else {
+                    continue;
+                };
+                let (Some(first), Some(last)) = (
+                    para.lines.get(f.lines.start),
+                    para.lines.get(f.lines.end - 1),
+                ) else {
+                    continue;
+                };
+                // Page y + shift = paragraph y, for this piece.
+                let shift = first.top - f.top;
+                // A piece continuing from an earlier page starts at its first line; the first
+                // piece at the paragraph's top, above a first line that moved down.
+                let floor = if f.lines.start == 0 { 0.0 } else { first.top };
+                for r in &wraps {
+                    let e = Exclusion {
+                        // Never reaching up into the paragraph's lines on an earlier page.
+                        top: (r.y + shift).max(floor),
+                        bottom: r.y + r.height + shift,
+                        left: r.x - f.left,
+                        right: r.x + r.width - f.left,
+                    };
+                    if e.top < last.bottom && e.bottom > floor {
+                        out[f.paragraph].push(e);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Places a body paragraph line by line, breaking pages between lines, with its objects
+    /// that break text on lines of their own and its objects positioned on the page.
     fn stack_paragraph(&self, s: &mut Stacker, index: usize) {
         s.out.first_line[index] = s.out.lines.len();
         let Some(para) = self.paragraph(index) else {
@@ -332,22 +512,63 @@ impl Paginator {
         let left = s.g.margin_left;
         let width = s.g.content_width();
         let style = self.style(index);
+        let objects = self.objects.get(index).map_or(&[][..], Vec::as_slice);
         let mut start = 0;
+        // Page and y of the paragraph's first line: what positioned objects are measured from.
+        let mut top: Option<(usize, f32)> = None;
         for (i, line) in para.lines.iter().enumerate() {
             let h = line.bottom - line.top;
             // Space before is dropped at the top of a page, so pages start flush with the
-            // margin, as in Google Docs.
-            let before = if i == 0 && s.y > s.g.margin_top {
+            // margin, as in Google Docs. So is a gap left where a line moved below a wrapped
+            // object.
+            let above = if i == 0 {
+                0.0
+            } else {
+                para.lines[i - 1].bottom
+            };
+            let gap = (line.top - above).max(0.0);
+            let mut pre = if i == 0 && s.y > s.g.margin_top {
                 style.space_before
             } else {
                 0.0
             };
-            if s.needs_break(before + h) {
+            let last = i + 1 == para.lines.len();
+            for (k, o) in objects.iter().enumerate() {
+                if o.mode != ObjectMode::Break || !holds(line, o.byte, last) {
+                    continue;
+                }
+                let (fw, fh) = o.footprint();
+                let band = fh + 2.0 * BREAK_MARGIN;
+                // A fragment's lines can't have gaps layout doesn't know of, so the lines so
+                // far end one here.
+                s.push_fragment(index, start..i, para, left);
+                start = i;
+                if s.needs_break(pre + band + h) {
+                    s.new_page();
+                    pre = 0.0;
+                }
+                s.y += pre + BREAK_MARGIN;
+                pre = 0.0;
+                let x = (left + o.x).clamp(0.0, (s.g.width - fw).max(0.0));
+                let page = s.page();
+                s.place_on(page, index, k, o, x, s.y, Layer::Text);
+                s.y += fh + BREAK_MARGIN;
+            }
+            if s.needs_break(pre + gap + h) {
                 s.push_fragment(index, start..i, para, left);
                 s.new_page();
                 start = i;
+                if i == 0 {
+                    top = Some((s.page(), s.y));
+                }
             } else {
-                s.y += before;
+                s.y += pre;
+                // The paragraph's top, not its first line's: that line may have moved below
+                // an object measured from this very point.
+                if i == 0 {
+                    top = Some((s.page(), s.y));
+                }
+                s.y += gap;
             }
             s.out.lines.push(PlacedLine {
                 page: s.page(),
@@ -369,6 +590,34 @@ impl Paginator {
         s.push_fragment(index, start..para.lines.len(), para, left);
         // Space after may run past the bottom margin; the next block then starts a new page.
         s.y += style.space_after;
+
+        let Some((page, y0)) = top else {
+            return;
+        };
+        for (k, o) in objects.iter().enumerate() {
+            let layer = match o.mode {
+                ObjectMode::Inline | ObjectMode::Break => continue,
+                ObjectMode::Wrap => Layer::Text,
+                ObjectMode::Behind => Layer::Behind,
+                ObjectMode::Front => Layer::Front,
+            };
+            // Kept on the page, which may put it nearer the paragraph than asked.
+            let (fw, fh) = o.footprint();
+            let x = (left + o.x).clamp(0.0, (s.g.width - fw).max(0.0));
+            let y = (y0 + o.y).clamp(0.0, (s.g.height - fh).max(0.0));
+            let b = s.place_on(page, index, k, o, x, y, layer).bounds;
+            if o.mode == ObjectMode::Wrap {
+                s.out.wraps.push((
+                    page,
+                    Rect {
+                        x: b.x - WRAP_MARGIN,
+                        y: b.y - WRAP_MARGIN,
+                        width: b.width + 2.0 * WRAP_MARGIN,
+                        height: b.height + 2.0 * WRAP_MARGIN,
+                    },
+                ));
+            }
+        }
     }
 
     fn style(&self, index: usize) -> ParagraphStyle {
@@ -553,6 +802,15 @@ struct Stacked {
     pages: Vec<Page>,
     lines: Vec<PlacedLine>,
     first_line: Vec<usize>,
+    /// Wrapped objects plus their margin: `(page, area)`.
+    wraps: Vec<(usize, Rect)>,
+}
+
+/// Whether `line` holds the placeholder at `byte`. The last line also holds a placeholder at
+/// its very end.
+fn holds(line: &Line, byte: usize, last: bool) -> bool {
+    let r = &line.byte_range;
+    r.start <= byte && (byte < r.end || (last && byte == r.end))
 }
 
 /// Running state while stacking blocks onto pages.
@@ -605,11 +863,42 @@ impl Stacker {
     }
 
     fn new_page(&mut self) {
-        self.out.pages.push(Page {
-            fragments: Vec::new(),
-            rules: Vec::new(),
-        });
+        self.out.pages.push(Page::default());
         self.y = self.g.margin_top;
+    }
+
+    /// Places an object with its bounding box's top-left corner at `(x, y)` on `page`.
+    #[allow(clippy::too_many_arguments)]
+    fn place_on(
+        &mut self,
+        page: usize,
+        paragraph: usize,
+        object: usize,
+        o: &ObjectInput,
+        x: f32,
+        y: f32,
+        layer: Layer,
+    ) -> PlacedObject {
+        let (fw, fh) = o.footprint();
+        let placed = PlacedObject {
+            key: o.key,
+            paragraph,
+            object,
+            layer,
+            bounds: Rect {
+                x,
+                y,
+                width: fw,
+                height: fh,
+            },
+            width: o.width,
+            height: o.height,
+            rotation: o.rotation,
+        };
+        if let Some(p) = self.out.pages.get_mut(page) {
+            p.objects.push(placed);
+        }
+        placed
     }
 
     /// Adds the fragment of `lines` ending at the current y to the current page.
@@ -645,7 +934,12 @@ fn cell_text_width(content: f32, cols: usize) -> f32 {
     (content / cols.max(1) as f32 - 2.0 * CELL_PADDING).max(1.0)
 }
 
-fn cache_key(p: &ParagraphInput, width: f32) -> u64 {
+fn cache_key(
+    p: &ParagraphInput,
+    width: f32,
+    objects: &[ObjectInput],
+    exclusions: &[Exclusion],
+) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     p.text.hash(&mut h);
     hash_style(p.base, &mut h);
@@ -657,6 +951,21 @@ fn cache_key(p: &ParagraphInput, width: f32) -> u64 {
     p.style.align.hash(&mut h);
     p.style.line_spacing.to_bits().hash(&mut h);
     width.to_bits().hash(&mut h);
+    // Only what changes the lines: in-line objects' boxes and where the others sit in the text.
+    for o in objects {
+        o.byte.hash(&mut h);
+        o.mode.hash(&mut h);
+        if o.mode == ObjectMode::Inline {
+            let (w, ht) = o.footprint();
+            w.to_bits().hash(&mut h);
+            ht.to_bits().hash(&mut h);
+        }
+    }
+    for e in exclusions {
+        for v in [e.top, e.bottom, e.left, e.right] {
+            v.to_bits().hash(&mut h);
+        }
+    }
     h.finish()
 }
 

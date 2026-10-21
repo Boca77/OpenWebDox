@@ -1,5 +1,6 @@
 import init, { Editor } from "../crates/opendox-wasm/pkg/opendox_wasm.js";
 import { Collaboration, EditorView } from "../packages/editor/dist/index.js";
+import { setUpImages } from "./images.js";
 
 // Collaboration: open /demo/?doc=<id> in several tabs (needs `npm run sync-server`).
 // Optional: &server=ws://host:port, &name=<display name>.
@@ -96,6 +97,7 @@ async function main() {
   })();
   setUpExport(editor, fontsLoaded);
   setUpTableMenu(view);
+  setUpImages(view);
 
   const collab = DOC_ID ? startCollaboration(editor, view) : null;
 
