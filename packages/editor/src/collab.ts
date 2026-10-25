@@ -9,7 +9,10 @@ export interface SyncEngine {
   sync_disconnected(): void;
   sync_is_synced(): boolean;
   sync_flush(): Bytes | undefined;
-  /** `[flags, anchor, focus]`; flags: 1 = document changed, 2 = remote carets changed. */
+  /**
+   * `[flags, anchor, focus]`; flags: 1 = document changed, 2 = remote carets changed,
+   * 4 = the server allows viewing only (the engine refuses local edits from then on).
+   */
   sync_receive(message: Uint8Array, anchor: number, focus: number): Uint32Array;
   sync_presence(name: string, color: string, anchor: number, focus: number, visible: boolean): Bytes;
   peer_ids(): Uint32Array;
@@ -36,10 +39,17 @@ export interface CollaborationOptions {
   flushMs?: number;
   /** Caret moves are sent at most this often (default 60 ms). */
   presenceMs?: number;
+  /**
+   * Access token for servers that require one (`opendox-server --secret`), issued by your
+   * application. Sent as the `token` query parameter, since browsers can't set headers on
+   * WebSockets.
+   */
+  token?: string;
 }
 
 const DOC_CHANGED = 1;
 const PEERS_CHANGED = 2;
+const READ_ONLY = 4;
 const RETRY_MIN_MS = 500;
 const RETRY_MAX_MS = 8000;
 
@@ -53,6 +63,8 @@ const RETRY_MAX_MS = 8000;
 export class Collaboration {
   /** Called when the connection state or the list of people changes. */
   onStatus?: (state: ConnectionState, peers: Peer[]) => void;
+  /** Called when the server says this user may only view the document. */
+  onReadOnly?: () => void;
 
   private ws: WebSocket | null = null;
   private state: ConnectionState = "offline";
@@ -107,7 +119,9 @@ export class Collaboration {
 
   private open(): void {
     if (this.ws || this.stopped) return;
-    const ws = new WebSocket(this.url);
+    const token = this.user.token;
+    const url = token ? `${this.url}${this.url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : this.url;
+    const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     this.setState("connecting");
@@ -137,6 +151,10 @@ export class Collaboration {
     const wasSynced = this.engine.sync_is_synced();
     const { anchor, focus } = this.view.selection;
     const [flags, a, f] = this.engine.sync_receive(message, anchor, focus);
+    if (flags & READ_ONLY) {
+      this.view.setReadOnly(true);
+      this.onReadOnly?.();
+    }
     if (flags & (DOC_CHANGED | PEERS_CHANGED)) {
       this.view.applyRemote(a, f, (flags & DOC_CHANGED) !== 0);
     }

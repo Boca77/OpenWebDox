@@ -21,6 +21,7 @@ fn style() -> TextStyle {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     }
 }
 
@@ -44,6 +45,7 @@ fn para<'a>(text: &'a str, base: &'a TextStyle, objects: &'a [ObjectInput]) -> P
         spans: &[],
         style: ParagraphStyle::default(),
         objects,
+        marker: None,
     }
 }
 

@@ -1,3 +1,4 @@
+import { htmlToClip } from "./clipboard.js";
 import { OBJECT_STRIDE, PageRenderer, type LayoutSource, type RenderStats } from "./renderer.js";
 import {
   parseProps,
@@ -18,7 +19,29 @@ import {
  */
 export interface EditorEngine extends LayoutSource {
   layout(): number;
+  /** The range as clipboard HTML (with opendox's exact content in it). */
+  copy_html(start: number, end: number): string;
+  /** Pastes clipboard JSON at `pos`; returns the caret after it. */
+  paste(pos: number, json: string): number;
+  /** Comments the range; returns the new comment's id. `created`: ms since the epoch. */
+  add_comment(anchor: number, focus: number, author: string, text: string, created: number): string;
+  reply_comment(id: string, author: string, text: string, created: number): void;
+  resolve_comment(id: string, resolved: boolean): void;
+  edit_comment(id: string, text: string): void;
+  delete_comment(id: string): void;
+  /** JSON array of comments (see `Comment`). */
+  comments_json(): string;
+  /** The open comment covering `pos`, if any. */
+  comment_at(pos: number): string | undefined;
+  /** Highlights one comment's text more strongly ("" for none); lay out after. */
+  set_active_comment(id: string): void;
+  /** Refuses (or allows) local edits; commands then throw. */
+  set_read_only(on: boolean): void;
+  is_read_only(): boolean;
+  /** Largest position in the body. */
   len(): number;
+  /** Largest position anywhere (the header and footer follow the body). */
+  end(): number;
   slice(start: number, end: number): string;
   /** Returns the caret position after the inserted text. */
   insert(pos: number, text: string): number;
@@ -28,6 +51,12 @@ export interface EditorEngine extends LayoutSource {
   delete_forward(pos: number): number;
   move_left(pos: number): number;
   move_right(pos: number): number;
+  /** To the next word's start (forward) or the start of the word before. */
+  move_word(pos: number, forward: boolean): number;
+  /** `[start, end]` of the word or run of spaces at `pos`. */
+  word_range(pos: number): Uint32Array;
+  /** Ctrl+Backspace / Ctrl+Delete; returns the caret. */
+  delete_word(pos: number, forward: boolean): number;
   /** `[pos, upstream]` */
   hit_test(page: number, x: number, y: number): Uint32Array | undefined;
   /** `[page, x, top, bottom]` in points */
@@ -53,16 +82,67 @@ export interface EditorEngine extends LayoutSource {
   set_font_size(anchor: number, focus: number, size: number): void;
   /** Family name; "" = default font. */
   set_font(anchor: number, focus: number, family: string): void;
-  /** `[bold, italic, size]`, size 0 = default */
+  set_underline(anchor: number, focus: number, on: boolean): void;
+  set_strikethrough(anchor: number, focus: number, on: boolean): void;
+  /** `#rrggbb`; "" = default. */
+  set_text_color(anchor: number, focus: number, color: string): void;
+  /** `#rrggbb`; "" = none. */
+  set_highlight(anchor: number, focus: number, color: string): void;
+  /** 0 normal, 1 superscript, 2 subscript. */
+  set_script(anchor: number, focus: number, script: number): void;
+  /** Links the selection (or the link at a caret, or inserts the URL); returns `[start, end]`. */
+  set_link(anchor: number, focus: number, url: string): Uint32Array;
+  link_at(pos: number): string | undefined;
+  /** `[start, end]` of the link at the caret. */
+  link_range(pos: number): Uint32Array | undefined;
+  /** `[bold, italic, size, underline, strikethrough, script]`, size 0 = default */
   char_format(anchor: number, focus: number): Float32Array;
   char_font(anchor: number, focus: number): string;
+  char_color(anchor: number, focus: number): string;
+  char_highlight(anchor: number, focus: number): string;
   /** 0 left, 1 centre, 2 right, 3 justify */
   set_align(anchor: number, focus: number, align: number): void;
   set_line_spacing(anchor: number, focus: number, spacing: number): void;
   set_space_before(anchor: number, focus: number, pt: number): void;
   set_space_after(anchor: number, focus: number, pt: number): void;
-  /** `[align, line spacing, space before, space after]` */
+  /**
+   * `[align, line spacing, space before, space after, indent start, indent end, first line
+   * indent, list, list level, checked, style, page break before]`; list 0 none, 1 bullets,
+   * 2 numbers, 3 checklist; style as in `set_paragraph_style`.
+   */
   paragraph_format(pos: number): Float32Array;
+  /** 0 normal, 1 title, 2 subtitle, 3–8 heading 1–6. */
+  set_paragraph_style(anchor: number, focus: number, style: number): void;
+  /** `[flat start, level]` pairs: level 0 title, 1–6 headings. */
+  headings(): Uint32Array;
+  set_header(on: boolean): void;
+  set_footer(on: boolean): void;
+  has_header(): boolean;
+  has_footer(): boolean;
+  /** 0 page number, 1 page count; returns the caret after it. */
+  insert_field(pos: number, kind: number): number;
+  /** 0 body, 1 header, 2 footer. */
+  region(pos: number): number;
+  /** `[first, last]` of `pos`'s region. */
+  region_bounds(pos: number): Uint32Array;
+  /** Start of the header (1) or footer (2). */
+  region_start(region: number): number | undefined;
+  /** Splits at `pos` and starts the rest on a new page; returns the caret after it. */
+  insert_page_break(pos: number): number;
+  set_page_break(pos: number, on: boolean): void;
+  /** `[width, height, top, right, bottom, left]` in points. */
+  page_setup(): Float32Array;
+  set_page_setup(width: number, height: number, top: number, right: number, bottom: number, left: number): void;
+  /** 0 none, 1 bullets, 2 numbers, 3 checklist. */
+  set_list(anchor: number, focus: number, kind: number): void;
+  indent(anchor: number, focus: number, deeper: boolean): void;
+  set_checked(pos: number, checked: boolean): void;
+  /** Points: from the left margin, from the right margin, first line relative to the rest. */
+  set_indents(anchor: number, focus: number, start: number, end: number, first: number): void;
+  /** Start of the list item whose marker is at the point, if any. */
+  marker_at(page: number, x: number, y: number): number | undefined;
+  /** `[start, end]` of the paragraph holding `pos`. */
+  paragraph_range(pos: number): Uint32Array;
   /** The selection to restore as `[anchor, focus]`, or undefined if there was nothing. */
   undo(anchor: number, focus: number): Uint32Array | undefined;
   redo(anchor: number, focus: number): Uint32Array | undefined;
@@ -116,10 +196,64 @@ type Handle = { dx: number; dy: number } | "rotate";
 export type Alignment = "left" | "center" | "right" | "justify";
 const ALIGNMENTS: Alignment[] = ["left", "center", "right", "justify"];
 
+export type Script = "normal" | "super" | "sub";
+const SCRIPTS: Script[] = ["normal", "super", "sub"];
+
+export type ParagraphStyleName = "normal" | "title" | "subtitle" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+const PARAGRAPH_STYLES: ParagraphStyleName[] = ["normal", "title", "subtitle", "h1", "h2", "h3", "h4", "h5", "h6"];
+
+/** A title or heading, for an outline. */
+export interface Heading {
+  /** Where the heading starts. */
+  pos: number;
+  /** 0 title, 1–6 heading level. */
+  level: number;
+  text: string;
+}
+
+/** A reply to a comment. */
+export interface CommentReply {
+  author: string;
+  text: string;
+  /** Milliseconds since the Unix epoch. */
+  created: number;
+}
+
+/** A comment on a range of text. `start`/`end` are positions; equal once its text is deleted. */
+export interface Comment {
+  id: string;
+  start: number;
+  end: number;
+  author: string;
+  text: string;
+  created: number;
+  resolved: boolean;
+  replies: CommentReply[];
+}
+
+/** Where the caret is: the body (with its tables), the page header or the page footer. */
+export type DocRegion = "body" | "header" | "footer";
+const REGIONS: DocRegion[] = ["body", "header", "footer"];
+
+export type ListType = "none" | "bullet" | "number" | "check";
+const LISTS: ListType[] = ["none", "bullet", "number", "check"];
+
+/** What typing at the start of a paragraph, then a space, turns it into (as in Google Docs). */
+const AUTO_LISTS: Record<string, ListType> = { "*": "bullet", "-": "bullet", "1.": "number", "1)": "number", "[]": "check" };
+
 /** Formatting at the caret or selection, for toolbars. */
 export interface FormatState {
   bold: boolean;
   italic: boolean;
+  underline: boolean;
+  strikethrough: boolean;
+  script: Script;
+  /** `#rrggbb`; `null` = the default colour. */
+  color: string | null;
+  /** `#rrggbb`; `null` = none. */
+  highlight: string | null;
+  /** The URL of the link at the caret, if any. */
+  link: string | null;
   /** Points; `null` = the document default. */
   size: number | null;
   /** Family name; `null` = the document default. */
@@ -128,6 +262,22 @@ export interface FormatState {
   lineSpacing: number;
   spaceBefore: number;
   spaceAfter: number;
+  /** Points; the paragraph's own indents, not counting its list level. */
+  indentStart: number;
+  indentEnd: number;
+  indentFirst: number;
+  list: ListType;
+  /** 0 to 8. */
+  listLevel: number;
+  /** The caret's paragraph style. */
+  style: ParagraphStyleName;
+  /** The caret's paragraph starts a new page. */
+  pageBreakBefore: boolean;
+  /** Where the caret is. */
+  region: DocRegion;
+  hasHeader: boolean;
+  hasFooter: boolean;
+  checked: boolean;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -164,6 +314,20 @@ export type TableCommand =
   | "deleteTable";
 
 const RECT_STRIDE = 5;
+
+/** Whether a key press would change the document (blocked when read-only): deleting, Enter,
+ * Tab, and shortcuts other than select-all and copy. */
+function editingKey(e: KeyboardEvent): boolean {
+  if (["Backspace", "Delete", "Enter", "Tab"].includes(e.key)) return true;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !e.altKey && !e.shiftKey && ["a", "c"].includes(e.key.toLowerCase())) return false;
+  return mod || (e.altKey && e.shiftKey);
+}
+
+/** Whether a key press moves or deletes by words: Ctrl, or Alt on macOS. */
+function wordKey(e: KeyboardEvent): boolean {
+  return /Mac|iPhone|iPad/.test(navigator.platform) ? e.altKey && !e.metaKey : e.ctrlKey;
+}
 
 const STYLE_ID = "opendox-editor-style";
 const STYLES = `
@@ -221,11 +385,16 @@ export class EditorView {
   onUpdate?: (stats: EditStats) => void;
   /** Called whenever the caret or selection moves. */
   onSelectionChange?: () => void;
+  /** Called for Ctrl+K: the app shows its link editor, then calls {@link setLink}. */
+  onLinkRequest?: () => void;
+  /** Called for Ctrl+Alt+M: the app shows its new-comment box, then calls {@link addComment}. */
+  onCommentRequest?: () => void;
   /** Other people's selections, drawn with the local one. Set by `Collaboration`. */
   remoteSelections?: () => RemoteSelection[];
 
   private readonly editListeners: (() => void)[] = [];
   private readonly selectionListeners: (() => void)[] = [];
+  private readonly remoteListeners: (() => void)[] = [];
   private readonly input: HTMLTextAreaElement;
   private anchor = 0;
   private focus = 0;
@@ -234,6 +403,8 @@ export class EditorView {
   private goalX: number | null = null;
   private composing = false;
   private dragging = false;
+  /** The last press, to count double and triple clicks. */
+  private lastClick = { x: 0, y: 0, time: 0, count: 0 };
   /** Id of the selected image, if one is selected instead of text. */
   private image: string | null = null;
   /** An image move, resize or turn in progress, shown as a frame until it's dropped. */
@@ -295,14 +466,33 @@ export class EditorView {
     this.relayout();
   }
 
+  /** Whether local edits are refused (a view-only collaborator, or the app's choice). */
+  get readOnly(): boolean {
+    return this.engine.is_read_only();
+  }
+
+  /**
+   * Makes the document view-only (or editable again): typing, deleting, pasting and dropping
+   * do nothing; moving, selecting and copying still work. Commands called anyway throw.
+   */
+  setReadOnly(on: boolean): void {
+    this.engine.set_read_only(on);
+    this.container.classList.toggle("opendox-readonly", on);
+    this.drawSelection();
+  }
+
   /** Current selection; `anchor === focus` when it's just a caret. */
   get selection(): { anchor: number; focus: number } {
     return { anchor: this.anchor, focus: this.focus };
   }
 
-  /** Listens for local edits (`"edit"`) or caret/selection moves (`"selection"`). */
-  on(event: "edit" | "selection", listener: () => void): void {
-    (event === "edit" ? this.editListeners : this.selectionListeners).push(listener);
+  /**
+   * Listens for local edits (`"edit"`), changes made elsewhere and applied with
+   * {@link applyRemote} (`"remote"`), or caret/selection moves (`"selection"`).
+   */
+  on(event: "edit" | "remote" | "selection", listener: () => void): void {
+    const lists = { edit: this.editListeners, remote: this.remoteListeners, selection: this.selectionListeners };
+    lists[event].push(listener);
   }
 
   /**
@@ -312,8 +502,12 @@ export class EditorView {
   applyRemote(anchor: number, focus: number, docChanged: boolean): void {
     this.anchor = anchor;
     this.focus = focus;
-    if (docChanged) this.relayout();
-    else this.drawSelection();
+    if (docChanged) {
+      this.relayout();
+      for (const l of this.remoteListeners) l();
+    } else {
+      this.drawSelection();
+    }
   }
 
   focusEditor(): void {
@@ -329,10 +523,28 @@ export class EditorView {
   insertText(text: string): void {
     const clean = text.replace(/\r\n?/g, "\n");
     if (!clean) return;
+    if (clean === " " && this.autoList()) return;
     const at = this.deleteSelectionRaw();
     const after = this.engine.insert(at, clean);
     this.collapseTo(after, false);
     this.edited();
+  }
+
+  /**
+   * A space typed after "*", "-", "1." or "[]" at the start of a plain paragraph makes it a
+   * list item instead. Returns whether it did.
+   */
+  private autoList(): boolean {
+    if (this.anchor !== this.focus) return false;
+    const [start] = this.engine.paragraph_range(this.focus);
+    const type = AUTO_LISTS[this.engine.slice(start, this.focus)];
+    if (!type || this.formatState().list !== "none" || this.tableInfo()) return false;
+    const at = this.engine.delete(start, this.focus);
+    this.engine.layout();
+    this.engine.set_list(at, at, LISTS.indexOf(type));
+    this.collapseTo(at, false);
+    this.edited();
+    return true;
   }
 
   /** Inserts a table at the caret and puts the caret in its first cell. */
@@ -527,18 +739,38 @@ export class EditorView {
   /** Formatting at the caret or across the selection. */
   formatState(): FormatState {
     const e = this.engine;
-    const [bold, italic, size] = e.char_format(this.anchor, this.focus);
+    const [bold, italic, size, underline, strikethrough, script] = e.char_format(this.anchor, this.focus);
     const font = e.char_font(this.anchor, this.focus);
-    const [align, lineSpacing, spaceBefore, spaceAfter] = e.paragraph_format(this.focus);
+    const color = e.char_color(this.anchor, this.focus);
+    const highlight = e.char_highlight(this.anchor, this.focus);
+    const [align, lineSpacing, spaceBefore, spaceAfter, indentStart, indentEnd, indentFirst, list, level, checked, style, pageBreak] =
+      e.paragraph_format(this.focus);
     return {
       bold: bold === 1,
       italic: italic === 1,
+      underline: underline === 1,
+      strikethrough: strikethrough === 1,
+      script: SCRIPTS[script] ?? "normal",
+      color: color || null,
+      highlight: highlight || null,
+      link: e.link_at(this.focus) ?? null,
       size: size > 0 ? size : null,
       font: font || null,
       align: ALIGNMENTS[align] ?? "left",
       lineSpacing: Math.round(lineSpacing * 100) / 100,
       spaceBefore,
       spaceAfter,
+      indentStart,
+      indentEnd,
+      indentFirst,
+      list: LISTS[list] ?? "none",
+      listLevel: level,
+      checked: checked === 1,
+      style: PARAGRAPH_STYLES[style] ?? "normal",
+      pageBreakBefore: pageBreak === 1,
+      region: REGIONS[e.region(this.focus)] ?? "body",
+      hasHeader: e.has_header(),
+      hasFooter: e.has_footer(),
       canUndo: e.can_undo(),
       canRedo: e.can_redo(),
     };
@@ -551,6 +783,52 @@ export class EditorView {
 
   toggleItalic(): void {
     this.format((a, f) => this.engine.set_italic(a, f, !this.formatState().italic));
+  }
+
+  toggleUnderline(): void {
+    this.format((a, f) => this.engine.set_underline(a, f, !this.formatState().underline));
+  }
+
+  toggleStrikethrough(): void {
+    this.format((a, f) => this.engine.set_strikethrough(a, f, !this.formatState().strikethrough));
+  }
+
+  /** Superscript or subscript on, or back to normal if it already is. */
+  toggleScript(script: Exclude<Script, "normal">): void {
+    const next = this.formatState().script === script ? "normal" : script;
+    this.format((a, f) => this.engine.set_script(a, f, SCRIPTS.indexOf(next)));
+  }
+
+  /** Text colour as `#rrggbb`; `null` for the default. */
+  setTextColor(color: string | null): void {
+    this.format((a, f) => this.engine.set_text_color(a, f, color ?? ""));
+  }
+
+  /** Highlight colour as `#rrggbb`; `null` removes it. */
+  setHighlight(color: string | null): void {
+    this.format((a, f) => this.engine.set_highlight(a, f, color ?? ""));
+  }
+
+  /**
+   * Links the selection to `url`, or changes the link at the caret; with nothing selected
+   * outside a link, inserts the URL as linked text. An empty `url` removes the link.
+   */
+  setLink(url: string): void {
+    const [start, end] = this.engine.set_link(this.anchor, this.focus, url.trim());
+    this.anchor = start;
+    this.focus = end;
+    this.upstream = false;
+    this.edited();
+  }
+
+  /** Selects the whole link at the caret; returns whether there was one. */
+  selectLink(): boolean {
+    const r = this.engine.link_range(this.focus);
+    if (!r) return false;
+    this.anchor = r[0];
+    this.focus = r[1];
+    this.drawSelection();
+    return true;
   }
 
   /** Font size in points; `null` for the default. */
@@ -579,6 +857,175 @@ export class EditorView {
     this.engine.set_space_before(this.anchor, this.focus, before);
     this.engine.set_space_after(this.anchor, this.focus, after);
     this.edited();
+  }
+
+  /**
+   * Makes the selected paragraphs list items of `type`, or plain paragraphs if they already
+   * are (the toolbar buttons toggle, as in Google Docs).
+   */
+  toggleList(type: Exclude<ListType, "none">): void {
+    this.setList(this.formatState().list === type ? "none" : type);
+  }
+
+  setList(type: ListType): void {
+    this.engine.set_list(this.anchor, this.focus, LISTS.indexOf(type));
+    this.edited();
+  }
+
+  /** Increase (`deeper`) or decrease indent: a list level, or 0.5 in for other paragraphs. */
+  indent(deeper: boolean): void {
+    this.engine.indent(this.anchor, this.focus, deeper);
+    this.edited();
+  }
+
+  /** Indents of the selected paragraphs, in points. */
+  setIndents(start: number, end: number, first: number): void {
+    this.engine.set_indents(this.anchor, this.focus, start, end, first);
+    this.edited();
+  }
+
+  /** Ticks or clears the checklist item at the caret. */
+  setChecked(checked: boolean): void {
+    this.engine.set_checked(this.focus, checked);
+    this.edited();
+  }
+
+  /**
+   * Adds the header or footer (and puts the caret in it), or removes it with its text. Adding
+   * one that exists just moves the caret there.
+   */
+  setMargin(region: Exclude<DocRegion, "body">, on: boolean): void {
+    const e = this.engine;
+    const has = region === "header" ? e.has_header() : e.has_footer();
+    if (on && !has) {
+      if (region === "header") e.set_header(true);
+      else e.set_footer(true);
+    }
+    if (!on && has) {
+      if (region === "header") e.set_header(false);
+      else e.set_footer(false);
+      if (e.region(this.focus) !== 0 || e.region(this.anchor) !== 0) this.collapseTo(0, false);
+      this.edited();
+      return;
+    }
+    e.layout();
+    const start = e.region_start(REGIONS.indexOf(region));
+    if (start !== undefined) {
+      const [, end] = e.region_bounds(start);
+      this.collapseTo(end, false);
+    }
+    this.edited();
+  }
+
+  /** Inserts a page number or page count at the caret, which must be in the header or footer. */
+  insertField(kind: "page" | "pages"): void {
+    if (this.engine.region(this.focus) === 0) return;
+    const at = this.deleteSelectionRaw();
+    this.collapseTo(this.engine.insert_field(at, kind === "pages" ? 1 : 0), false);
+    this.edited();
+  }
+
+  /** Ctrl+Enter: continues on a new page from the caret (replacing any selection). */
+  insertPageBreak(): void {
+    const at = this.deleteSelectionRaw();
+    this.collapseTo(this.engine.insert_page_break(at), false);
+    this.edited();
+  }
+
+  /** Page size and margins in points, for everyone editing the document. */
+  pageSetup(): { width: number; height: number; top: number; right: number; bottom: number; left: number } {
+    const [width, height, top, right, bottom, left] = this.engine.page_setup();
+    return { width, height, top, right, bottom, left };
+  }
+
+  /** Throws if the margins leave no room for text. */
+  setPageSetup(p: { width: number; height: number; top: number; right: number; bottom: number; left: number }): void {
+    this.engine.set_page_setup(p.width, p.height, p.top, p.right, p.bottom, p.left);
+    this.edited();
+  }
+
+  /** Comments the selection (which must not be empty); returns the comment's id. */
+  addComment(author: string, text: string): string {
+    const id = this.engine.add_comment(this.anchor, this.focus, author, text, Date.now());
+    this.engine.set_active_comment(id);
+    this.edited();
+    return id;
+  }
+
+  /** Every comment, open and resolved, in reading order. */
+  comments(): Comment[] {
+    return JSON.parse(this.engine.comments_json()) as Comment[];
+  }
+
+  replyToComment(id: string, author: string, text: string): void {
+    this.engine.reply_comment(id, author, text, Date.now());
+    this.edited();
+  }
+
+  resolveComment(id: string, resolved = true): void {
+    this.engine.resolve_comment(id, resolved);
+    this.edited();
+  }
+
+  editComment(id: string, text: string): void {
+    this.engine.edit_comment(id, text);
+    this.edited();
+  }
+
+  deleteComment(id: string): void {
+    this.engine.delete_comment(id);
+    this.edited();
+  }
+
+  /**
+   * The open comment at the caret or the start of the selection (the most recent if several),
+   * if any. A caret just after commented text counts, as after typing a comment's last word.
+   */
+  commentAtCaret(): string | null {
+    const e = this.engine;
+    const pos = Math.min(this.anchor, this.focus);
+    const after = this.anchor === this.focus && pos > 0 ? e.comment_at(pos - 1) : undefined;
+    return e.comment_at(pos) ?? after ?? null;
+  }
+
+  /** Shows one comment's text highlighted more strongly (or none), as when its card is open. */
+  setActiveComment(id: string | null): void {
+    this.engine.set_active_comment(id ?? "");
+    this.relayout();
+  }
+
+  /** Gives the selected paragraphs a style (heading, title…). */
+  setParagraphStyle(style: ParagraphStyleName): void {
+    this.engine.set_paragraph_style(this.anchor, this.focus, PARAGRAPH_STYLES.indexOf(style));
+    this.edited();
+  }
+
+  /** Titles and headings in reading order, for an outline. */
+  headings(): Heading[] {
+    const h = this.engine.headings();
+    const out: Heading[] = [];
+    for (let i = 0; i < h.length; i += 2) {
+      const [start, end] = this.engine.paragraph_range(h[i]);
+      out.push({ pos: h[i], level: h[i + 1], text: this.engine.slice(start, end) });
+    }
+    return out;
+  }
+
+  /** Selects from `anchor` to `focus` (positions; equal for a caret). */
+  setSelection(anchor: number, focus: number): void {
+    this.anchor = anchor;
+    this.focus = focus;
+    this.upstream = false;
+    this.goalX = null;
+    this.drawSelection();
+  }
+
+  /** Puts the caret at `pos` and scrolls it into view (e.g. from an outline). */
+  goTo(pos: number): void {
+    this.collapseTo(pos, false);
+    this.goalX = null;
+    this.focusEditor();
+    this.drawSelection();
   }
 
   /** Undoes this user's last change; other people's edits are never undone. */
@@ -615,9 +1062,10 @@ export class EditorView {
     const pages = this.engine.layout();
     const layoutMs = performance.now() - t0;
     const render = this.renderer.render(pages);
-    const len = this.engine.len();
-    this.anchor = Math.min(this.anchor, len);
-    this.focus = Math.min(this.focus, len);
+    // Positions run on past the body into the header and footer.
+    const end = this.engine.end();
+    this.anchor = Math.min(this.anchor, end);
+    this.focus = Math.min(this.focus, end);
     this.drawSelection();
     this.onUpdate?.({ layoutMs, render });
   }
@@ -632,13 +1080,15 @@ export class EditorView {
 
   private onPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
+    // Read-only: no moving or resizing images, no ticking checkboxes; selecting still works.
+    const locked = this.readOnly;
     const handle = (e.target as HTMLElement).closest<HTMLElement>(".opendox-handle");
     const pt = this.pagePoint(e.clientX, e.clientY);
-    if (pt && (handle || (e.target as HTMLElement).closest(".opendox-image-frame"))) {
+    if (!locked && pt && (handle || (e.target as HTMLElement).closest(".opendox-image-frame"))) {
       this.startGesture(e, handle, pt);
       return;
     }
-    const over = pt ? this.imageAt(pt.page, pt.x, pt.y) : undefined;
+    const over = pt && !locked ? this.imageAt(pt.page, pt.x, pt.y) : undefined;
     if (over) {
       this.selectImage(over);
       this.focusEditor();
@@ -646,15 +1096,59 @@ export class EditorView {
       return;
     }
     if (this.image) this.selectImage(null);
+    if (pt && !locked && this.toggleCheckbox(pt.page, pt.x, pt.y)) {
+      e.preventDefault();
+      this.focusEditor();
+      return;
+    }
     const hit = this.hitAt(e.clientX, e.clientY);
     if (!hit) return;
     // Keep focus in the textarea and stop the browser starting its own text selection.
     e.preventDefault();
+    const url = (e.ctrlKey || e.metaKey) && this.engine.link_at(hit[0]);
+    if (url) {
+      this.onOpenLink(url);
+      return;
+    }
     this.focusEditor();
     this.setCaret(hit[0], hit[1] === 1, e.shiftKey);
     this.goalX = null;
+    // Double-click selects a word, triple-click the paragraph, as in Google Docs. Counted
+    // here: pointer events' `detail` is always 0 in Chrome.
+    const now = performance.now();
+    const near = Math.abs(e.clientX - this.lastClick.x) < 5 && Math.abs(e.clientY - this.lastClick.y) < 5;
+    // A fourth click starts over as a single click.
+    const clicks = near && now - this.lastClick.time < 500 ? (this.lastClick.count % 3) + 1 : 1;
+    this.lastClick = { x: e.clientX, y: e.clientY, time: now, count: clicks };
+    if (clicks >= 2 && !e.shiftKey) {
+      const [a, b] = clicks === 2 ? this.engine.word_range(hit[0]) : this.engine.paragraph_range(hit[0]);
+      this.anchor = a;
+      this.focus = b;
+      this.upstream = false;
+      this.drawSelection();
+      return;
+    }
     this.dragging = true;
     this.container.setPointerCapture(e.pointerId);
+  }
+
+  /** Opens a link in a new tab; only web and mail links, never `javascript:` and the like. */
+  private onOpenLink(url: string): void {
+    const safe = /^(https?:|mailto:)/i.test(url) ? url : /^[\w.-]+\.[a-z]{2,}/i.test(url) ? `https://${url}` : null;
+    if (safe) window.open(safe, "_blank", "noopener,noreferrer");
+  }
+
+  /** A click on a checklist item's box ticks or clears it. Returns whether it was one. */
+  private toggleCheckbox(page: number, x: number, y: number): boolean {
+    const item = this.engine.marker_at(page, x, y);
+    if (item === undefined) return false;
+    const f = this.engine.paragraph_format(item);
+    if (LISTS[f[7]] !== "check") return false;
+    this.engine.set_checked(item, f[9] !== 1);
+    // Into the item, so redrawing the caret doesn't scroll the view back to where it was.
+    this.collapseTo(item, false);
+    this.edited();
+    return true;
   }
 
   private onPointerMove(e: PointerEvent): void {
@@ -819,6 +1313,10 @@ export class EditorView {
   private async onDrop(e: DragEvent): Promise<void> {
     const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
+    if (this.readOnly) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     const hit = this.hitAt(e.clientX, e.clientY);
     if (hit) this.collapseTo(hit[0], hit[1] === 1);
@@ -859,23 +1357,48 @@ export class EditorView {
   // --- keyboard --------------------------------------------------------------------------
 
   private onKeyDown(e: KeyboardEvent): void {
+    // Typing ends a multi-click: the next click is a single click.
+    this.lastClick.count = 0;
     if (this.composing || e.isComposing) return;
+    if (this.readOnly && editingKey(e)) {
+      e.preventDefault();
+      return;
+    }
     if (this.image && this.onImageKey(e)) {
       e.preventDefault();
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
     const extend = e.shiftKey;
-    if (mod && !e.altKey && this.onShortcut(e.key.toLowerCase(), e.shiftKey)) {
+    if (mod && !e.altKey && this.onShortcut(e.key.toLowerCase(), e.shiftKey, e.code)) {
+      e.preventDefault();
+      return;
+    }
+    // Ctrl+Alt+M: comment, as in Google Docs.
+    if (mod && e.altKey && !e.shiftKey && e.code === "KeyM" && this.onCommentRequest) {
+      this.onCommentRequest();
+      e.preventDefault();
+      return;
+    }
+    // Ctrl+Alt+0–6: normal text, heading 1–6, as in Google Docs.
+    if (mod && e.altKey && !e.shiftKey && /^Digit[0-6]$/.test(e.code)) {
+      const n = Number(e.code.slice(5));
+      this.setParagraphStyle(n === 0 ? "normal" : PARAGRAPH_STYLES[2 + n]);
+      e.preventDefault();
+      return;
+    }
+    // Alt+Shift+5: strikethrough, as in Google Docs (by physical key: Shift changes the digit).
+    if (e.altKey && e.shiftKey && !mod && e.code === "Digit5") {
+      this.toggleStrikethrough();
       e.preventDefault();
       return;
     }
     switch (e.key) {
       case "ArrowLeft":
-        this.moveHorizontal(false, extend);
+        this.moveHorizontal(false, extend, wordKey(e));
         break;
       case "ArrowRight":
-        this.moveHorizontal(true, extend);
+        this.moveHorizontal(true, extend, wordKey(e));
         break;
       case "ArrowUp":
         this.moveVertical(false, extend);
@@ -890,27 +1413,43 @@ export class EditorView {
         this.moveToLineEdge(true, mod, extend);
         break;
       case "Backspace":
-        this.deleteBackward();
+        if (wordKey(e) && this.anchor === this.focus) this.deleteWord(false);
+        else if (!this.removePageBreak() && !this.leaveList(false)) this.deleteBackward();
         break;
       case "Delete":
-        this.deleteForward();
+        if (wordKey(e) && this.anchor === this.focus) this.deleteWord(true);
+        else this.deleteForward();
         break;
       case "Enter":
+        if (mod) {
+          this.insertPageBreak();
+          break;
+        }
+        if (!e.shiftKey && this.leaveList(true)) break;
         this.insertText("\n");
         break;
       case "Tab":
-        // Outside tables Tab keeps its default job of moving focus out of the editor.
-        if (mod || !this.tableInfo()) return;
-        this.tabToCell(!e.shiftKey);
+        if (mod) return;
+        if (this.tableInfo()) {
+          this.tabToCell(!e.shiftKey);
+        } else if (this.formatState().list !== "none") {
+          this.indent(!e.shiftKey);
+        } else {
+          // Elsewhere Tab keeps its default job of moving focus out of the editor.
+          return;
+        }
         break;
       case "a":
-      case "A":
+      case "A": {
         if (!mod) return;
-        this.anchor = 0;
-        this.focus = this.engine.len();
+        // Everything in the caret's region: the body, or all of the header or footer.
+        const [first, last] = this.engine.region_bounds(this.focus);
+        this.anchor = first;
+        this.focus = last;
         this.upstream = false;
         this.drawSelection();
         break;
+      }
       default:
         return;
     }
@@ -950,10 +1489,16 @@ export class EditorView {
   }
 
   /** Ctrl/Cmd shortcuts, as in Google Docs. Returns whether `key` was one. */
-  private onShortcut(key: string, shift: boolean): boolean {
+  private onShortcut(key: string, shift: boolean, code: string): boolean {
     const aligns: Record<string, Alignment> = { l: "left", e: "center", r: "right", j: "justify" };
+    // By physical key: with Shift, the digit keys type other characters on most layouts.
+    const lists: Record<string, Exclude<ListType, "none">> = { Digit7: "number", Digit8: "bullet", Digit9: "check" };
     if (shift && key in aligns) {
       this.setAlign(aligns[key]);
+    } else if (shift && code in lists) {
+      this.toggleList(lists[code]);
+    } else if (!shift && (key === "]" || key === "[")) {
+      this.indent(key === "]");
     } else if (key === "z") {
       if (shift) this.redo();
       else this.undo();
@@ -963,21 +1508,35 @@ export class EditorView {
       this.toggleBold();
     } else if (key === "i" && !shift) {
       this.toggleItalic();
+    } else if (key === "u" && !shift) {
+      this.toggleUnderline();
+    } else if (code === "Period" && !shift) {
+      this.toggleScript("super");
+    } else if (code === "Comma" && !shift) {
+      this.toggleScript("sub");
+    } else if (key === "k" && !shift && this.onLinkRequest) {
+      this.onLinkRequest();
     } else {
       return false;
     }
     return true;
   }
 
-  private moveHorizontal(forward: boolean, extend: boolean): void {
+  /** Left/Right by a character, or by a word with Ctrl (Alt on macOS). */
+  private moveHorizontal(forward: boolean, extend: boolean, word = false): void {
     this.goalX = null;
-    if (!extend && this.anchor !== this.focus) {
+    if (!extend && !word && this.anchor !== this.focus) {
       const [lo, hi] = this.range();
       this.collapseTo(forward ? hi : lo, false);
       this.drawSelection();
       return;
     }
-    const to = forward ? this.engine.move_right(this.focus) : this.engine.move_left(this.focus);
+    const e = this.engine;
+    const to = word
+      ? e.move_word(this.focus, forward)
+      : forward
+        ? e.move_right(this.focus)
+        : e.move_left(this.focus);
     this.setCaret(to, false, extend);
   }
 
@@ -989,7 +1548,8 @@ export class EditorView {
     if (to) {
       this.setCaret(to[0], to[1] === 1, extend);
     } else {
-      this.setCaret(down ? this.engine.len() : 0, false, extend);
+      const [first, last] = this.engine.region_bounds(this.focus);
+      this.setCaret(down ? last : first, false, extend);
     }
     this.goalX = goal;
   }
@@ -997,7 +1557,8 @@ export class EditorView {
   private moveToLineEdge(end: boolean, wholeDocument: boolean, extend: boolean): void {
     this.goalX = null;
     if (wholeDocument) {
-      this.setCaret(end ? this.engine.len() : 0, false, extend);
+      const [first, last] = this.engine.region_bounds(this.focus);
+      this.setCaret(end ? last : first, false, extend);
       return;
     }
     const to = end
@@ -1016,6 +1577,38 @@ export class EditorView {
       to = this.engine.next_cell(this.focus);
     }
     if (to !== undefined) this.collapseTo(to, false);
+    this.edited();
+  }
+
+  /** Backspace at the start of a paragraph that starts a new page removes the break first,
+   * rather than joining it to the paragraph before. Returns whether it did. */
+  private removePageBreak(): boolean {
+    if (this.anchor !== this.focus) return false;
+    const [start] = this.engine.paragraph_range(this.focus);
+    if (this.focus !== start || !this.formatState().pageBreakBefore) return false;
+    this.engine.set_page_break(this.focus, false);
+    this.edited();
+    return true;
+  }
+
+  /**
+   * Enter on an empty list item, or Backspace at the start of one, takes it out of the list
+   * (a nested item moves up a level on Enter), as in Google Docs. Returns whether it did.
+   */
+  private leaveList(enter: boolean): boolean {
+    if (this.anchor !== this.focus) return false;
+    const f = this.formatState();
+    if (f.list === "none") return false;
+    const [start, end] = this.engine.paragraph_range(this.focus);
+    if (this.focus !== start || (enter && end !== start)) return false;
+    if (enter && f.listLevel > 0) this.engine.indent(this.focus, this.focus, false);
+    else this.engine.set_list(this.focus, this.focus, 0);
+    this.edited();
+    return true;
+  }
+
+  private deleteWord(forward: boolean): void {
+    this.collapseTo(this.engine.delete_word(this.focus, forward), false);
     this.edited();
   }
 
@@ -1040,6 +1633,7 @@ export class EditorView {
   // --- text input and IME ----------------------------------------------------------------
 
   private onInput(): void {
+    this.lastClick.count = 0;
     if (this.composing) return;
     this.flushInput();
   }
@@ -1065,16 +1659,26 @@ export class EditorView {
   private flushInput(): void {
     const text = this.input.value;
     this.input.value = "";
-    if (text) this.insertText(text);
+    if (text && !this.readOnly) this.insertText(text);
   }
 
   private onPaste(e: ClipboardEvent): void {
     e.preventDefault();
+    if (this.readOnly) return;
     const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
     if (files.length > 0) {
       void (async () => {
         for (const f of files) await this.insertImageFile(f);
       })();
+      return;
+    }
+    // Formatted content first: opendox's own (exact) or other apps' HTML, as one undo step.
+    const html = e.clipboardData?.getData("text/html");
+    const clip = html ? htmlToClip(html) : null;
+    if (clip) {
+      const at = this.deleteSelectionRaw();
+      this.collapseTo(this.engine.paste(at, clip), false);
+      this.edited();
       return;
     }
     const text = e.clipboardData?.getData("text/plain");
@@ -1086,7 +1690,8 @@ export class EditorView {
     e.preventDefault();
     const [lo, hi] = this.range();
     e.clipboardData?.setData("text/plain", this.engine.slice(lo, hi));
-    if (cut) {
+    e.clipboardData?.setData("text/html", this.engine.copy_html(lo, hi));
+    if (cut && !this.readOnly) {
       this.deleteSelectionRaw();
       this.edited();
     }
@@ -1112,6 +1717,11 @@ export class EditorView {
   }
 
   private setCaret(pos: number, upstream: boolean, extend: boolean): void {
+    if (extend) {
+      // A selection stays in the region it started in.
+      const [first, last] = this.engine.region_bounds(this.anchor);
+      pos = Math.min(Math.max(pos, first), last);
+    }
     this.focus = pos;
     if (!extend) this.anchor = pos;
     this.upstream = upstream;
@@ -1219,8 +1829,8 @@ export class EditorView {
   /** Another person's selection wash and caret, with their name above the caret. */
   private drawRemote(r: RemoteSelection): void {
     const k = this.renderer.cssPerPt;
-    const len = this.engine.len();
-    const [a, f] = [Math.min(r.anchor, len), Math.min(r.focus, len)];
+    const end = this.engine.end();
+    const [a, f] = [Math.min(r.anchor, end), Math.min(r.focus, end)];
     if (a !== f) {
       const rects = this.engine.selection_rects(a, f);
       for (let i = 0; i < rects.length; i += RECT_STRIDE) {

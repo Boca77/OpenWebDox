@@ -15,6 +15,7 @@ fn setup() -> (LayoutEngine, FontId, TextStyle) {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     };
     (LayoutEngine::new(fonts), id, style)
 }
@@ -63,6 +64,7 @@ fn placed_glyphs_sit_inside_the_page_margins() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         })
         .collect();
     let g = PageGeometry::letter();

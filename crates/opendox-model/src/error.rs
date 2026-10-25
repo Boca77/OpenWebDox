@@ -15,6 +15,27 @@ pub enum ModelError {
     #[error("no such table")]
     NoSuchTable,
 
+    #[error("page setup leaves no room for text")]
+    InvalidPageSetup,
+
+    #[error("page number fields only go in a header or footer")]
+    FieldOutsideHeader,
+
+    #[error("footnotes go in body or table text, not in a header, footer or footnote")]
+    FootnoteOutsideBody,
+
+    #[error("no such footnote")]
+    NoSuchFootnote,
+
+    #[error("not a clipboard clip: {0}")]
+    BadClip(String),
+
+    #[error("a comment needs some text selected")]
+    EmptyComment,
+
+    #[error("no such comment")]
+    NoSuchComment,
+
     #[error("no such table cell")]
     NoSuchCell,
 

@@ -4,20 +4,35 @@
 //! Positions passed in from JS are **flat positions** (see `opendox_model::Outline`): one number
 //! per caret position, counting body text and table cells together in reading order.
 
-use opendox_export::{DocxOptions, ExportImage, PdfInfo};
+use opendox_export::{DocxOptions, ExportImage, PdfHeading, PdfInfo, PdfLink};
 use opendox_layout::{
-    BlockInput, FontId, FontLibrary, Layer, LayoutEngine, ObjectInput, ObjectMode, PageGeometry,
-    Paginator, ParagraphInput, ParagraphStyle, StyleSpan, TableInput, TextPosition, TextStyle,
+    BlockInput, DecorationKind, FontId, FontLibrary, Layer, LayoutEngine, Marker, ObjectInput,
+    ObjectMode, PageGeometry, Paginator, ParagraphInput, ParagraphStyle, StyleSpan, TableInput,
+    TextPosition, TextStyle,
 };
 use opendox_model::{
-    Align, Anchor, Block, CharFormat, Document, FormatChange, FormatRun, History, ImageChange,
-    ImageData, ImageProps, Outline, ParagraphChange, ParagraphFormat, Recolor, TextRef, Wrap,
+    list_indent, list_markers, Align, Anchor, Block, CharFormat, Clip, Comment, Document,
+    FieldKind, FormatChange, FormatRun, History, ImageChange, ImageData, ImageProps, ListKind,
+    Outline, PageSetup, ParagraphChange, ParagraphFormat, Recolor, Region, Script, SlotFormat,
+    StyleName, TextRef, Wrap,
 };
 use opendox_sync::{Presence, SyncClient};
 use wasm_bindgen::prelude::*;
 
 /// Floats per glyph in [`Editor::page_glyphs`].
-pub const GLYPH_STRIDE: usize = 6;
+pub const GLYPH_STRIDE: usize = 7;
+
+/// Floats per highlight, underline or strikethrough in [`Editor::page_decorations`].
+pub const DECORATION_STRIDE: usize = 6;
+
+/// How link text looks unless it has its own colour (Google Docs' link blue).
+const LINK_COLOR: u32 = 0x1155CC;
+
+/// How ticked checklist items look: struck through in this grey, as in Google Docs.
+const TICKED_COLOR: u32 = 0x80868B;
+
+/// Superscript and subscript size, as a share of the text's size.
+const SCRIPT_SCALE: f32 = 0.65;
 
 /// Floats per rectangle in [`Editor::selection_rects`].
 pub const RECT_STRIDE: usize = 5;
@@ -48,12 +63,25 @@ pub struct Editor {
     pending: Option<(usize, CharFormat)>,
     /// Image ids by the key layout was given for them, as of the last layout.
     object_ids: Vec<String>,
+    /// Family list appended to list markers' fonts, for bullets and checkboxes the text
+    /// fonts lack.
+    symbol_font: Option<String>,
+    /// Each paragraph's formatting as of the last layout, for link queries.
+    formats: Vec<SlotFormat>,
+    /// Local edits are refused (a view-only connection, or the app's choice).
+    read_only: bool,
+    /// Comments as of the last layout.
+    comments: Vec<Comment>,
+    /// The comment shown as selected (its text highlighted more strongly).
+    active_comment: Option<String>,
 }
 
 /// Bit set in [`Editor::sync_receive`]'s flags when the document changed.
 pub const SYNC_DOC_CHANGED: u32 = 1;
 /// Bit set when a remote caret appeared, moved or left.
 pub const SYNC_PEERS_CHANGED: u32 = 2;
+/// Bit set when the server said this connection may only view the document.
+pub const SYNC_READ_ONLY: u32 = 4;
 
 impl Default for Editor {
     fn default() -> Self {
@@ -78,6 +106,7 @@ impl Editor {
                 font_size: 12.0,
                 font_weight: 400.0,
                 italic: false,
+                ..TextStyle::default()
             },
             outline,
             sync: SyncClient::new(),
@@ -85,6 +114,11 @@ impl Editor {
             history,
             last_edit_end: None,
             pending: None,
+            symbol_font: None,
+            formats: Vec::new(),
+            read_only: false,
+            comments: Vec::new(),
+            active_comment: None,
             object_ids: Vec::new(),
         }
     }
@@ -97,6 +131,13 @@ impl Editor {
     }
 
     /// Sets the default font as a CSS-style family list and a size in points.
+    /// Font family list for list markers (● ○ ■ ☐ ☑) the text fonts lack, e.g.
+    /// `"Noto Sans Symbols 2"`. Used for markers only: adding it to the text's family list
+    /// would also change which font draws characters no font has, and with it line heights.
+    pub fn set_symbol_font(&mut self, family: String) {
+        self.symbol_font = (!family.is_empty()).then_some(family);
+    }
+
     pub fn set_default_font(&mut self, family: String, size: f32) {
         self.style.font_family = family;
         self.style.font_size = size;
@@ -108,9 +149,18 @@ impl Editor {
         o.slice(0, o.len)
     }
 
-    /// Largest flat position.
+    /// Largest flat position in the body (the header and footer come after it).
     pub fn len(&self) -> usize {
         self.outline.len
+    }
+
+    /// Largest flat position anywhere: the end of the footer, header or body, whichever is
+    /// last.
+    pub fn end(&self) -> usize {
+        self.outline
+            .slots
+            .last()
+            .map_or(self.outline.len, |s| s.flat_end())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -122,11 +172,33 @@ impl Editor {
         self.outline.slice(start, end)
     }
 
+    /// The selection as HTML for the clipboard: tags and styles other editors understand,
+    /// plus the exact content for pasting into opendox (see `paste`).
+    pub fn copy_html(&self, start: usize, end: usize) -> String {
+        self.doc.copy_at(&self.outline, start, end).to_html()
+    }
+
+    /// The selection in opendox's clipboard format (JSON).
+    pub fn copy_json(&self, start: usize, end: usize) -> String {
+        self.doc.copy_at(&self.outline, start, end).to_json()
+    }
+
+    /// Pastes content in opendox's clipboard format (JSON, from `copy_json` or the
+    /// `data-opendox-clip` attribute of `copy_html`, or built from other HTML) at `pos`, as
+    /// one undo step. Returns the caret after it.
+    pub fn paste(&mut self, pos: usize, json: &str) -> Result<usize, JsError> {
+        let clip = Clip::from_json(json)?;
+        self.begin(pos, pos, false)?;
+        self.last_edit_end = None;
+        self.pending = None;
+        Ok(self.doc.paste_at(&self.outline, pos, &clip)?)
+    }
+
     // --- editing -------------------------------------------------------------------------
 
     /// Inserts `text` at `pos` and returns the caret position just after it.
     pub fn insert(&mut self, pos: usize, text: &str) -> Result<usize, JsError> {
-        self.begin(pos, pos, true);
+        self.begin(pos, pos, true)?;
         let after = match self.pending.take().filter(|(p, _)| *p == pos) {
             Some((_, f)) => self.doc.insert_formatted_at(&self.outline, pos, text, &f)?,
             None => self.doc.insert_at(&self.outline, pos, text)?,
@@ -138,7 +210,7 @@ impl Editor {
     /// Deletes between two positions; returns where the caret goes. Spanning body text and a
     /// table deletes the whole table; spanning cells of one table clears them.
     pub fn delete(&mut self, start: usize, end: usize) -> Result<usize, JsError> {
-        self.begin(start, end, false);
+        self.begin(start, end, false)?;
         let at = self.doc.delete_range_at(&self.outline, start, end)?;
         // Typing over a selection undoes together with the deletion.
         self.last_edit_end = Some(at);
@@ -147,7 +219,7 @@ impl Editor {
 
     /// Backspace: returns the new caret position.
     pub fn delete_backward(&mut self, pos: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, true);
+        self.begin(pos, pos, true)?;
         let at = self.doc.delete_backward_at(&self.outline, pos)?;
         self.last_edit_end = Some(at);
         Ok(at)
@@ -155,7 +227,7 @@ impl Editor {
 
     /// Delete key: returns the new caret position.
     pub fn delete_forward(&mut self, pos: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, true);
+        self.begin(pos, pos, true)?;
         let at = self.doc.delete_forward_at(&self.outline, pos)?;
         self.last_edit_end = Some(at);
         Ok(at)
@@ -188,15 +260,139 @@ impl Editor {
         self.format(anchor, focus, FormatChange::Font(f))
     }
 
-    /// `[bold, italic, size]` at the caret or across the selection (bold/italic only if all
-    /// of it is). Size 0 means the default. Includes a pending format at the caret.
+    pub fn set_underline(&mut self, anchor: usize, focus: usize, on: bool) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Underline(on))
+    }
+
+    pub fn set_strikethrough(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        on: bool,
+    ) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Strike(on))
+    }
+
+    /// Text colour as `#rrggbb`; empty returns to the default.
+    pub fn set_text_color(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        color: &str,
+    ) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Color(hex_color(color)))
+    }
+
+    /// Highlight colour as `#rrggbb`; empty removes it.
+    pub fn set_highlight(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        color: &str,
+    ) -> Result<(), JsError> {
+        self.format(anchor, focus, FormatChange::Highlight(hex_color(color)))
+    }
+
+    /// 0 normal, 1 superscript, 2 subscript.
+    pub fn set_script(&mut self, anchor: usize, focus: usize, script: u32) -> Result<(), JsError> {
+        let s = match script {
+            1 => Script::Super,
+            2 => Script::Sub,
+            _ => Script::Normal,
+        };
+        self.format(anchor, focus, FormatChange::Script(s))
+    }
+
+    /// Links the selection to `url` (empty removes the link). With nothing selected: inside
+    /// a link, changes or removes that whole link; elsewhere inserts `url` as linked text.
+    /// Returns the linked range as `[start, end]`, to select.
+    pub fn set_link(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        url: &str,
+    ) -> Result<Vec<u32>, JsError> {
+        let link = (!url.is_empty()).then(|| url.to_owned());
+        let (mut lo, mut hi) = (anchor.min(focus), anchor.max(focus));
+        if lo == hi {
+            if let Some([a, b]) = self.link_bounds(lo) {
+                (lo, hi) = (a, b);
+            } else if let Some(url) = &link {
+                self.begin(lo, lo, false)?;
+                self.last_edit_end = None;
+                let end = self.doc.insert_at(&self.outline, lo, url)?;
+                let fresh = self.doc.outline();
+                self.doc
+                    .format_at(&fresh, lo, end, &FormatChange::Link(link.clone()))?;
+                return Ok(vec![lo as u32, end as u32]);
+            } else {
+                return Ok(vec![lo as u32, hi as u32]);
+            }
+        }
+        self.begin(lo, hi, false)?;
+        self.last_edit_end = None;
+        self.pending = None;
+        self.doc
+            .format_at(&self.outline, lo, hi, &FormatChange::Link(link))?;
+        Ok(vec![lo as u32, hi as u32])
+    }
+
+    /// The URL of the link at the caret (the character after it, or before it at a link's
+    /// end), per the last layout.
+    pub fn link_at(&self, pos: usize) -> Option<String> {
+        let (slot, off) = self.outline.slot_at(self.outline.snap(pos))?;
+        let runs = &self.formats.get(slot)?.runs;
+        let at = |i: usize| {
+            runs.iter()
+                .find(|r| r.range.contains(&i))
+                .and_then(|r| r.format.link.clone())
+        };
+        at(off).or_else(|| at(off.checked_sub(1)?))
+    }
+
+    /// `[start, end]` of the whole link at the caret, or `undefined`.
+    pub fn link_range(&self, pos: usize) -> Option<Vec<u32>> {
+        self.link_bounds(pos).map(|r| r.map(|p| p as u32).to_vec())
+    }
+
+    /// `[bold, italic, size, underline, strikethrough, script]` at the caret or across the
+    /// selection (bold, italic, underline and strikethrough only if all of it has them). Size
+    /// is the text's own, else its paragraph style's, else 0 for the document default;
+    /// script 0 normal, 1 superscript, 2 subscript. Includes a pending format at the caret.
     pub fn char_format(&self, anchor: usize, focus: usize) -> Vec<f32> {
         let f = self.effective_format(anchor, focus);
+        let flag = |b: bool| f32::from(u8::from(b));
+        let look = self
+            .doc
+            .paragraph_format_at(&self.outline, anchor.min(focus))
+            .style
+            .look();
         vec![
-            f32::from(u8::from(f.bold)),
-            f32::from(u8::from(f.italic)),
-            f.size.unwrap_or(0.0),
+            flag(f.bold),
+            flag(f.italic || look.italic),
+            f.size.or(look.size).unwrap_or(0.0),
+            flag(f.underline),
+            flag(f.strike),
+            match f.script {
+                Script::Normal => 0.0,
+                Script::Super => 1.0,
+                Script::Sub => 2.0,
+            },
         ]
+    }
+
+    /// Text colour (`#rrggbb`) at the caret or the start of the selection; empty for default.
+    pub fn char_color(&self, anchor: usize, focus: usize) -> String {
+        self.effective_format(anchor, focus)
+            .color
+            .unwrap_or_default()
+    }
+
+    /// Highlight colour (`#rrggbb`) at the caret or the start of the selection; empty for none.
+    pub fn char_highlight(&self, anchor: usize, focus: usize) -> String {
+        self.effective_format(anchor, focus)
+            .highlight
+            .unwrap_or_default()
     }
 
     /// Font family at the caret or the start of the selection; empty for the default.
@@ -238,8 +434,10 @@ impl Editor {
         self.paragraph(anchor, focus, ParagraphChange::SpaceAfter(pt.max(0.0)))
     }
 
-    /// `[align, line spacing, space before, space after]` of the paragraph at `pos`; align as
-    /// in [`Editor::set_align`].
+    /// `[align, line spacing, space before, space after, indent start, indent end, first line
+    /// indent, list, list level, checked]` of the paragraph at `pos`; align as in
+    /// [`Editor::set_align`], list as in [`Editor::set_list`]. Indents are the paragraph's
+    /// own, without what its list level adds.
     pub fn paragraph_format(&self, pos: usize) -> Vec<f32> {
         let f = self.doc.paragraph_format_at(&self.outline, pos);
         let align = match f.align {
@@ -248,7 +446,170 @@ impl Editor {
             Align::Right => 2.0,
             Align::Justify => 3.0,
         };
-        vec![align, f.line_spacing, f.space_before, f.space_after]
+        let l = f.list;
+        vec![
+            align,
+            f.line_spacing,
+            f.space_before,
+            f.space_after,
+            f.indent_start,
+            f.indent_end,
+            f.indent_first,
+            list_code(l.map(|l| l.kind)) as f32,
+            l.map_or(0.0, |l| f32::from(l.level)),
+            f32::from(u8::from(l.is_some_and(|l| l.checked))),
+            style_code(f.style) as f32,
+            f32::from(u8::from(f.page_break_before)),
+        ]
+    }
+
+    /// Ctrl+Enter: splits the paragraph at `pos` and starts the rest on a new page. Returns
+    /// the caret position after the break.
+    pub fn insert_page_break(&mut self, pos: usize) -> Result<usize, JsError> {
+        self.begin(pos, pos, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.insert_page_break_at(&self.outline, pos)?)
+    }
+
+    /// Adds or removes the page break before the paragraph at `pos` (Backspace at its start
+    /// removes it).
+    pub fn set_page_break(&mut self, pos: usize, on: bool) -> Result<(), JsError> {
+        self.paragraph(pos, pos, ParagraphChange::PageBreakBefore(on))
+    }
+
+    /// `[width, height, top, right, bottom, left]`: the page size and margins in points.
+    pub fn page_setup(&self) -> Vec<f32> {
+        let p = self.doc.page_setup();
+        vec![
+            p.width,
+            p.height,
+            p.margin_top,
+            p.margin_right,
+            p.margin_bottom,
+            p.margin_left,
+        ]
+    }
+
+    /// Sets the page size and margins in points for everyone editing the document. Fails if
+    /// the margins leave less than half an inch for text.
+    pub fn set_page_setup(
+        &mut self,
+        width: f32,
+        height: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+    ) -> Result<(), JsError> {
+        self.begin(0, 0, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.set_page_setup(PageSetup {
+            width,
+            height,
+            margin_top: top,
+            margin_right: right,
+            margin_bottom: bottom,
+            margin_left: left,
+        })?)
+    }
+
+    /// Gives the paragraphs touched by the selection a style: 0 normal text, 1 title,
+    /// 2 subtitle, 3–8 heading 1–6.
+    pub fn set_paragraph_style(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        style: u32,
+    ) -> Result<(), JsError> {
+        self.paragraph(anchor, focus, ParagraphChange::Style(style_from(style)))
+    }
+
+    /// The document's titles and headings per the last layout, flattened as `[flat start,
+    /// level]` pairs in reading order; level 0 is a title, 1–6 headings. For an outline.
+    pub fn headings(&self) -> Vec<u32> {
+        self.outline
+            .slots
+            .iter()
+            .zip(&self.formats)
+            .filter_map(|(slot, f)| {
+                Some([
+                    slot.flat as u32,
+                    u32::from(f.paragraph.style.outline_level()?),
+                ])
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Makes the paragraphs touched by the selection list items: 0 none (plain paragraphs),
+    /// 1 bullets, 2 numbers, 3 checklist.
+    pub fn set_list(&mut self, anchor: usize, focus: usize, kind: u32) -> Result<(), JsError> {
+        self.begin(anchor, focus, false)?;
+        self.last_edit_end = None;
+        Ok(self
+            .doc
+            .set_list_at(&self.outline, anchor, focus, list_from(kind))?)
+    }
+
+    /// Indents (`deeper`) or outdents the paragraphs touched by the selection: list items by
+    /// a level (outdenting the first level ends the list), other paragraphs by 0.5 in.
+    pub fn indent(&mut self, anchor: usize, focus: usize, deeper: bool) -> Result<(), JsError> {
+        self.begin(anchor, focus, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.indent_at(&self.outline, anchor, focus, deeper)?)
+    }
+
+    /// Ticks or clears the checklist item at `pos`.
+    pub fn set_checked(&mut self, pos: usize, checked: bool) -> Result<(), JsError> {
+        self.paragraph(pos, pos, ParagraphChange::Checked(checked))
+    }
+
+    /// Indents of the paragraphs touched by the selection, in points: from the left margin,
+    /// from the right margin, and of the first line relative to the others.
+    pub fn set_indents(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        start: f32,
+        end: f32,
+        first: f32,
+    ) -> Result<(), JsError> {
+        self.begin(anchor, focus, false)?;
+        self.last_edit_end = None;
+        for change in [
+            ParagraphChange::IndentStart(start.max(0.0)),
+            ParagraphChange::IndentEnd(end.max(0.0)),
+            ParagraphChange::IndentFirst(first),
+        ] {
+            self.doc
+                .set_paragraph_format_at(&self.outline, anchor, focus, change)?;
+        }
+        Ok(())
+    }
+
+    /// `[start, end]`: flat positions of the start and end of the paragraph holding `pos`.
+    pub fn paragraph_range(&self, pos: usize) -> Vec<u32> {
+        let o = &self.outline;
+        o.slot_at(o.snap(pos)).map_or_else(
+            || vec![pos as u32, pos as u32],
+            |(i, _)| vec![o.slots[i].flat as u32, o.slots[i].flat_end() as u32],
+        )
+    }
+
+    /// The flat position of the start of the list item whose marker is at `(x, y)` points on
+    /// `page`, or `undefined` (a click on a checkbox ticks it).
+    pub fn marker_at(&self, page: usize, x: f32, y: f32) -> Option<usize> {
+        self.paginator
+            .placed_lines()
+            .iter()
+            .filter(|l| l.page == page && l.line == 0 && l.top <= y && y <= l.bottom)
+            .find_map(|l| {
+                let m = self.paginator.paragraph(l.paragraph)?.marker.as_ref()?;
+                let (x0, x1) = (l.left + m.x, l.left + m.x + m.width);
+                // A little slack: markers are small targets.
+                (x0 - 2.0 <= x && x <= x1 + 2.0).then(|| self.outline.slots.get(l.paragraph))?
+            })
+            .map(|s| s.flat)
     }
 
     // --- undo ----------------------------------------------------------------------------
@@ -269,6 +630,93 @@ impl Editor {
         self.history.can_undo()
     }
 
+    /// The whole document (with its history of edits, so it merges with other copies) as
+    /// bytes, for saving on this device. See `load_state`.
+    pub fn save_state(&self) -> Result<Vec<u8>, JsError> {
+        Ok(self.doc.export_snapshot()?)
+    }
+
+    /// Merges a saved copy (from `save_state`) into the document: load it before connecting,
+    /// and the sync handshake sends the server whatever it lacks (edits made offline).
+    pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        Ok(self.doc.import(bytes)?)
+    }
+
+    /// Comments the selection; returns the new comment's id. `created` is milliseconds since
+    /// the Unix epoch (`Date.now()`).
+    pub fn add_comment(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        author: &str,
+        text: &str,
+        created: f64,
+    ) -> Result<String, JsError> {
+        self.begin(anchor, focus, false)?;
+        self.last_edit_end = None;
+        Ok(self
+            .doc
+            .add_comment(&self.outline, anchor, focus, author, text, created)?)
+    }
+
+    pub fn reply_comment(
+        &mut self,
+        id: &str,
+        author: &str,
+        text: &str,
+        created: f64,
+    ) -> Result<(), JsError> {
+        self.comment_edit()?;
+        Ok(self.doc.reply_to_comment(id, author, text, created)?)
+    }
+
+    pub fn resolve_comment(&mut self, id: &str, resolved: bool) -> Result<(), JsError> {
+        self.comment_edit()?;
+        Ok(self.doc.resolve_comment(id, resolved)?)
+    }
+
+    pub fn edit_comment(&mut self, id: &str, text: &str) -> Result<(), JsError> {
+        self.comment_edit()?;
+        Ok(self.doc.edit_comment(id, text)?)
+    }
+
+    pub fn delete_comment(&mut self, id: &str) -> Result<(), JsError> {
+        self.comment_edit()?;
+        Ok(self.doc.delete_comment(id)?)
+    }
+
+    /// Every comment as of the last layout, as a JSON array of `{id, start, end, author,
+    /// text, created, resolved, replies: [{author, text, created}]}` in reading order (`start`
+    /// and `end` are flat positions).
+    pub fn comments_json(&self) -> String {
+        serde_json::to_string(&self.comments).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The id of the open (unresolved) comment covering `pos`, the most recent if several.
+    pub fn comment_at(&self, pos: usize) -> Option<String> {
+        self.comments
+            .iter()
+            .filter(|c| !c.resolved && c.start <= pos && pos < c.end.max(c.start + 1))
+            .max_by(|a, b| a.created.total_cmp(&b.created))
+            .map(|c| c.id.clone())
+    }
+
+    /// Shows comment `id` as selected (its text highlighted more strongly), or none with an
+    /// empty id. Call [`Editor::layout`] after.
+    pub fn set_active_comment(&mut self, id: &str) {
+        self.active_comment = (!id.is_empty()).then(|| id.to_owned());
+    }
+
+    /// Refuses (or allows again) every local edit: commands then fail with an error. The
+    /// sync connection sets it when the server allows viewing only.
+    pub fn set_read_only(&mut self, on: bool) {
+        self.read_only = on;
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Forgets undo history, e.g. after building the initial document.
     pub fn clear_history(&mut self) {
         self.history.clear();
@@ -284,6 +732,40 @@ impl Editor {
         self.outline.move_left(pos)
     }
 
+    /// Ctrl+Right / Ctrl+Left: to the next word's start, or the start of the word before.
+    pub fn move_word(&self, pos: usize, forward: bool) -> usize {
+        if forward {
+            self.outline.word_right(pos)
+        } else {
+            self.outline.word_left(pos)
+        }
+    }
+
+    /// `[start, end]` of the word (or run of spaces or punctuation) at `pos`: what a
+    /// double-click selects.
+    pub fn word_range(&self, pos: usize) -> Vec<u32> {
+        let r = self.outline.word_at(pos);
+        vec![r.start as u32, r.end as u32]
+    }
+
+    /// Ctrl+Backspace / Ctrl+Delete: deletes to the word boundary before or after `pos`
+    /// (joining paragraphs at their edges, like Backspace and Delete). Returns the caret.
+    pub fn delete_word(&mut self, pos: usize, forward: bool) -> Result<usize, JsError> {
+        let to = self.move_word(pos, forward);
+        let (lo, hi) = (pos.min(to), pos.max(to));
+        let same = self.outline.slot_at(lo).map(|s| s.0) == self.outline.slot_at(hi).map(|s| s.0);
+        if lo == hi || !same {
+            return if forward {
+                self.delete_forward(pos)
+            } else {
+                self.delete_backward(pos)
+            };
+        }
+        self.begin(pos, pos, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.delete_range_at(&self.outline, lo, hi)?)
+    }
+
     /// One grapheme right, crossing into the next paragraph or cell.
     pub fn move_right(&self, pos: usize) -> usize {
         self.outline.move_right(pos)
@@ -294,7 +776,7 @@ impl Editor {
     /// Inserts a table at the caret (after the current table if the caret is in one) and
     /// returns the position of its first cell.
     pub fn insert_table(&mut self, pos: usize, rows: usize, cols: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let body_pos = match self.outline.table_at(pos) {
             Some(t) => t.placeholder + 1,
@@ -329,7 +811,7 @@ impl Editor {
 
     /// Inserts a row above or below the caret's row; returns the caret in the new row.
     pub fn table_insert_row(&mut self, pos: usize, below: bool) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let c = self.cell(pos)?;
         let row = c.row + usize::from(below);
@@ -343,7 +825,7 @@ impl Editor {
 
     /// Inserts a column left or right of the caret's column; returns the caret in it.
     pub fn table_insert_column(&mut self, pos: usize, right: bool) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let c = self.cell(pos)?;
         let col = c.col + usize::from(right);
@@ -357,7 +839,7 @@ impl Editor {
 
     /// Deletes the caret's row (the whole table if it's the only row).
     pub fn table_delete_row(&mut self, pos: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let c = self.cell(pos)?;
         let rows = self.outline.table(&c.table).map_or(0, |t| t.rows());
@@ -375,7 +857,7 @@ impl Editor {
 
     /// Deletes the caret's column (the whole table if it's the only column).
     pub fn table_delete_column(&mut self, pos: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let c = self.cell(pos)?;
         let cols = self.outline.table(&c.table).map_or(0, |t| t.columns);
@@ -393,7 +875,7 @@ impl Editor {
 
     /// Deletes the table holding the caret; returns the caret where the table was.
     pub fn table_delete(&mut self, pos: usize) -> Result<usize, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let t = self
             .outline
@@ -421,7 +903,7 @@ impl Editor {
         width: f32,
         height: f32,
     ) -> Result<String, JsError> {
-        self.begin(pos, pos, false);
+        self.begin(pos, pos, false)?;
         self.last_edit_end = None;
         let image = ImageData {
             bytes: data,
@@ -605,7 +1087,7 @@ impl Editor {
                 (to, vec![ImageChange::Offset(x - g.margin_left, y - top)])
             }
         };
-        self.begin(from, from, false);
+        self.begin(from, from, false)?;
         self.last_edit_end = None;
         Ok(self.doc.move_image(&self.outline, id, to, changes)?)
     }
@@ -616,7 +1098,7 @@ impl Editor {
             .doc
             .image_position(&self.outline, id)
             .ok_or_else(|| JsError::new("no such image"))?;
-        self.begin(at, at, false);
+        self.begin(at, at, false)?;
         self.last_edit_end = None;
         self.doc.delete_image(&self.outline, id)?;
         Ok(at)
@@ -705,9 +1187,44 @@ impl Editor {
                 })
             })
             .collect();
+        // Links by paragraph and byte range, from the formats of the layout just done.
+        let mut links: Vec<PdfLink> = Vec::new();
+        for (i, (slot, f)) in self.outline.slots.iter().zip(&self.formats).enumerate() {
+            let byte = |c: usize| {
+                slot.text
+                    .char_indices()
+                    .nth(c)
+                    .map_or(slot.text.len(), |(b, _)| b)
+            };
+            for r in &f.runs {
+                if let Some(url) = &r.format.link {
+                    links.push(PdfLink {
+                        paragraph: i,
+                        bytes: byte(r.range.start)..byte(r.range.end),
+                        url,
+                    });
+                }
+            }
+        }
+        let headings: Vec<PdfHeading> = self
+            .outline
+            .slots
+            .iter()
+            .zip(&self.formats)
+            .enumerate()
+            .filter_map(|(i, (slot, f))| {
+                Some(PdfHeading {
+                    paragraph: i,
+                    level: f.paragraph.style.outline_level()?,
+                    title: &slot.text,
+                })
+            })
+            .collect();
         let info = PdfInfo {
             title: (!title.is_empty()).then_some(title),
             images: &images,
+            links: &links,
+            headings: &headings,
         };
         Ok(opendox_export::pdf(
             &self.paginator,
@@ -791,6 +1308,10 @@ impl Editor {
         if r.peers_changed {
             out[0] |= SYNC_PEERS_CHANGED;
         }
+        if r.read_only {
+            out[0] |= SYNC_READ_ONLY;
+            self.read_only = true;
+        }
         Ok(out)
     }
 
@@ -847,15 +1368,55 @@ impl Editor {
     /// Lays out the document and returns the page count. Call after every edit, before any
     /// position or geometry query.
     pub fn layout(&mut self) -> usize {
-        self.outline = self.doc.outline();
+        // Before anything borrows the outline: comment ranges come from the new structure.
+        let fresh = self.doc.outline();
+        self.comments = self.doc.comments(&fresh);
+        let p = self.doc.page_setup();
+        let g = PageGeometry {
+            width: p.width,
+            height: p.height,
+            margin_top: p.margin_top,
+            margin_right: p.margin_right,
+            margin_bottom: p.margin_bottom,
+            margin_left: p.margin_left,
+            ..PageGeometry::letter()
+        };
+        if *self.paginator.geometry() != g {
+            self.paginator.set_geometry(g);
+        }
+        self.outline = fresh;
         let formats = self.doc.formats(&self.outline);
         let o = &self.outline;
-        let style = &self.style;
+        // Ticked checklist items are drawn struck through and grey, all of their text.
+        // Each paragraph's base look: its style's size, colour and slant; ticked checklist
+        // items grey and struck through, all of their text.
+        let styled: Vec<TextStyle> = formats
+            .iter()
+            .map(|f| {
+                let look = f.paragraph.style.look();
+                let mut b = TextStyle {
+                    font_size: look.size.unwrap_or(self.style.font_size),
+                    color: look.color,
+                    italic: look.italic,
+                    ..self.style.clone()
+                };
+                if f.paragraph.list.is_some_and(|l| l.checked) {
+                    b.color = Some(TICKED_COLOR);
+                    b.strikethrough = true;
+                }
+                b
+            })
+            .collect();
+        let bases: Vec<&TextStyle> = styled.iter().collect();
         let spans: Vec<Vec<StyleSpan>> = o
             .slots
             .iter()
             .zip(&formats)
-            .map(|(slot, f)| style_spans(style, &slot.text, &f.runs))
+            .zip(&bases)
+            .map(|((slot, f), base)| {
+                let marks = comment_marks(&self.comments, slot, self.active_comment.as_deref());
+                style_spans(base, &slot.text, &with_comments(&f.runs, &marks))
+            })
             .collect();
         self.object_ids.clear();
         let mut objects: Vec<Vec<ObjectInput>> = Vec::with_capacity(o.slots.len());
@@ -873,16 +1434,69 @@ impl Editor {
                 list.push(object_input(&p, byte, self.object_ids.len()));
                 self.object_ids.push(r.id.clone());
             }
+            for fr in &f.fields {
+                let byte = slot
+                    .text
+                    .char_indices()
+                    .nth(fr.offset)
+                    .map_or(slot.text.len(), |(b, _)| b);
+                list.push(ObjectInput {
+                    byte,
+                    // Fields are drawn as text, never looked up as images.
+                    key: usize::MAX,
+                    width: 0.0,
+                    height: 0.0,
+                    rotation: 0.0,
+                    mode: ObjectMode::Field(match fr.kind {
+                        FieldKind::PageNumber => opendox_layout::FieldKind::PageNumber,
+                        FieldKind::PageCount => opendox_layout::FieldKind::PageCount,
+                    }),
+                    x: 0.0,
+                    y: 0.0,
+                });
+            }
+            list.sort_by_key(|o| o.byte);
             objects.push(list);
         }
+        let markers = list_markers(&formats);
+        // A marker looks like the start of its item's text (bold if that's bold), as in
+        // Google Docs.
+        let marker_styles: Vec<Option<TextStyle>> = spans
+            .iter()
+            .zip(&markers)
+            .zip(&bases)
+            .map(|((sp, m), base)| {
+                m.as_ref()?;
+                let first = sp
+                    .iter()
+                    .find(|s| s.byte_range.start == 0 && !s.byte_range.is_empty())
+                    .map_or(*base, |s| &s.style);
+                // Its colour, size and weight; never its underline, highlight or shift.
+                let mut s = TextStyle {
+                    underline: false,
+                    strikethrough: false,
+                    highlight: None,
+                    baseline_shift: 0.0,
+                    ..first.clone()
+                };
+                if let Some(symbols) = &self.symbol_font {
+                    s.font_family = format!("{}, {symbols}", s.font_family);
+                }
+                Some(s)
+            })
+            .collect();
         let para = |i: usize| ParagraphInput {
             text: &o.slots[i].text,
-            base: style,
+            base: bases[i],
             spans: &spans[i],
             style: formats
                 .get(i)
                 .map_or_else(ParagraphStyle::default, |f| paragraph_style(&f.paragraph)),
             objects: &objects[i],
+            marker: markers[i]
+                .as_deref()
+                .zip(marker_styles[i].as_ref())
+                .map(|(text, style)| Marker { text, style }),
         };
         let blocks: Vec<BlockInput> = o
             .blocks
@@ -902,9 +1516,40 @@ impl Editor {
                 }),
             })
             .collect();
-        self.paginator
-            .layout_blocks(&mut self.engine, &blocks)
-            .len()
+        let header: Vec<ParagraphInput> = o.header.clone().map(para).collect();
+        let footer: Vec<ParagraphInput> = o.footer.clone().map(para).collect();
+        let pages = self
+            .paginator
+            .layout_document(&mut self.engine, &blocks, &header, &footer)
+            .len();
+        self.formats = formats;
+        pages
+    }
+
+    /// The characters that no registered font could draw in the last layout (each once, in
+    /// order of appearance): they show as the missing-glyph box. An app can load a font that
+    /// covers them (emoji, CJK…) and lay out again.
+    pub fn missing_chars(&self) -> String {
+        let mut out = String::new();
+        for (i, slot) in self.outline.slots.iter().enumerate() {
+            let Some(p) = self.paginator.paragraph(i) else {
+                continue;
+            };
+            for run in p.lines.iter().flat_map(|l| &l.runs) {
+                for (g, r) in run.glyphs.iter().zip(&run.glyph_text) {
+                    if g.id != 0 {
+                        continue;
+                    }
+                    for c in slot.text.get(r.clone()).unwrap_or("").chars() {
+                        // Joiners and variation selectors ride along with what they join.
+                        if !out.contains(c) && !matches!(c, '\u{200D}' | '\u{FE0E}' | '\u{FE0F}') {
+                            out.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Page width in points.
@@ -918,8 +1563,9 @@ impl Editor {
     }
 
     /// Glyphs on page `index` from the last layout, flattened into groups of [`GLYPH_STRIDE`]:
-    /// `font id, face index, glyph id, x, y, font size` — positions in points from the page's
-    /// top-left corner, `(x, y)` being the glyph's baseline origin.
+    /// `font id, face index, glyph id, x, y, font size, colour` — positions in points from the
+    /// page's top-left corner, `(x, y)` being the glyph's baseline origin; colour `0xRRGGBB`
+    /// (exact in an f32) or -1 for the default ink.
     pub fn page_glyphs(&self, index: usize) -> Vec<f32> {
         let glyphs = self.paginator.placed_glyphs(index);
         let mut out = Vec::with_capacity(glyphs.len() * GLYPH_STRIDE);
@@ -931,6 +1577,31 @@ impl Editor {
                 g.x,
                 g.y,
                 g.font_size,
+                g.color.map_or(-1.0, |c| c as f32),
+            ]);
+        }
+        out
+    }
+
+    /// Highlights, underlines and strikethroughs on page `index`, highlights first, in groups
+    /// of [`DECORATION_STRIDE`]: `kind, x, y, width, height, colour` — a filled rectangle in
+    /// points; kind 0 highlight (draw before the text), 1 underline, 2 strikethrough; colour
+    /// as in [`Editor::page_glyphs`].
+    pub fn page_decorations(&self, index: usize) -> Vec<f32> {
+        let decorations = self.paginator.placed_decorations(index);
+        let mut out = Vec::with_capacity(decorations.len() * DECORATION_STRIDE);
+        for d in decorations {
+            out.extend_from_slice(&[
+                match d.kind {
+                    DecorationKind::Highlight => 0.0,
+                    DecorationKind::Underline => 1.0,
+                    DecorationKind::Strikethrough => 2.0,
+                },
+                d.rect.x,
+                d.rect.y,
+                d.rect.width,
+                d.rect.height,
+                d.color.map_or(-1.0, |c| c as f32),
             ]);
         }
         out
@@ -968,7 +1639,75 @@ impl Editor {
     /// The caret position nearest to `(x, y)` points on `page`, as `[pos, upstream]`.
     pub fn hit_test(&self, page: usize, x: f32, y: f32) -> Option<Vec<u32>> {
         let hit = self.paginator.hit_test(page, x, y)?;
-        Some(self.caret_out(hit))
+        let pos = self.caret_out(hit);
+        // A click in the header or footer: its caret is drawn on this page's copy.
+        if self.outline.region(pos[0] as usize) != Region::Body {
+            self.paginator.set_margin_page(page);
+        }
+        Some(pos)
+    }
+
+    /// Adds an empty header to every page, or removes the header and its text.
+    pub fn set_header(&mut self, on: bool) -> Result<(), JsError> {
+        self.begin(0, 0, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.set_header(on)?)
+    }
+
+    /// Adds an empty footer to every page, or removes the footer and its text.
+    pub fn set_footer(&mut self, on: bool) -> Result<(), JsError> {
+        self.begin(0, 0, false)?;
+        self.last_edit_end = None;
+        Ok(self.doc.set_footer(on)?)
+    }
+
+    pub fn has_header(&self) -> bool {
+        self.doc.has_header()
+    }
+
+    pub fn has_footer(&self) -> bool {
+        self.doc.has_footer()
+    }
+
+    /// Inserts a field at `pos` in the header or footer: 0 page number, 1 page count.
+    /// Returns the caret after it.
+    pub fn insert_field(&mut self, pos: usize, kind: u32) -> Result<usize, JsError> {
+        self.begin(pos, pos, false)?;
+        self.last_edit_end = None;
+        let k = if kind == 1 {
+            FieldKind::PageCount
+        } else {
+            FieldKind::PageNumber
+        };
+        Ok(self.doc.insert_field_at(&self.outline, pos, k)?)
+    }
+
+    /// Which part of the document `pos` is in: 0 body, 1 header, 2 footer, 3 a footnote.
+    pub fn region(&self, pos: usize) -> u32 {
+        match self.outline.region(pos) {
+            Region::Body => 0,
+            Region::Header => 1,
+            Region::Footer => 2,
+            Region::Footnote => 3,
+        }
+    }
+
+    /// `[first, last]` flat positions of `pos`'s part of the document (select all, Ctrl+Home
+    /// and Ctrl+End stay in it).
+    pub fn region_bounds(&self, pos: usize) -> Vec<u32> {
+        let (a, b) = self.outline.region_bounds(pos);
+        vec![a as u32, b as u32]
+    }
+
+    /// Start of the header (1) or footer (2) as of the last layout, or `undefined` if the
+    /// document has none.
+    pub fn region_start(&self, region: u32) -> Option<usize> {
+        let range = match region {
+            1 => &self.outline.header,
+            2 => &self.outline.footer,
+            _ => return Some(0),
+        };
+        self.outline.slots.get(range.start).map(|s| s.flat)
     }
 
     /// Where to draw the caret: `[page, x, top, bottom]` in points.
@@ -1022,10 +1761,45 @@ impl Editor {
 }
 
 impl Editor {
+    /// Before a comment change: refused when read-only; its own undo step.
+    fn comment_edit(&mut self) -> Result<(), JsError> {
+        self.begin(0, 0, false)?;
+        self.last_edit_end = None;
+        Ok(())
+    }
+
+    /// Flat bounds of the link at the caret: the run holding it, joined with neighbouring
+    /// runs linking to the same URL.
+    fn link_bounds(&self, pos: usize) -> Option<[usize; 2]> {
+        let url = self.link_at(pos)?;
+        let (slot, off) = self.outline.slot_at(self.outline.snap(pos))?;
+        let runs = &self.formats.get(slot)?.runs;
+        let same = |i: usize| runs[i].format.link.as_deref() == Some(url.as_str());
+        let hit = runs
+            .iter()
+            .position(|r| r.range.contains(&off) && r.format.link.as_deref() == Some(&url))
+            .or_else(|| {
+                runs.iter().position(|r| {
+                    off > 0
+                        && r.range.contains(&(off - 1))
+                        && r.format.link.as_deref() == Some(&url)
+                })
+            })?;
+        let (mut a, mut b) = (hit, hit);
+        while a > 0 && same(a - 1) && runs[a - 1].range.end == runs[a].range.start {
+            a -= 1;
+        }
+        while b + 1 < runs.len() && same(b + 1) && runs[b].range.end == runs[b + 1].range.start {
+            b += 1;
+        }
+        let flat = self.outline.slots[slot].flat;
+        Some([flat + runs[a].range.start, flat + runs[b].range.end])
+    }
+
     /// One undoable change to an image.
     fn image_edit(&mut self, id: &str, changes: Vec<ImageChange>) -> Result<(), JsError> {
         let at = self.doc.image_position(&self.outline, id).unwrap_or(0);
-        self.begin(at, at, false);
+        self.begin(at, at, false)?;
         self.last_edit_end = None;
         Ok(self.doc.set_image_many(id, changes)?)
     }
@@ -1108,22 +1882,30 @@ impl Editor {
         Some((l.page, l.top - line_top))
     }
 
-    /// Before every local edit: records the selection for undo, and lets the edit join the
-    /// previous undo step only when it's typing that continues where the last edit ended.
-    fn begin(&mut self, anchor: usize, focus: usize, typing: bool) {
+    /// Before every local edit: refuses it if the document is read-only, records the selection
+    /// for undo, and lets the edit join the previous undo step only when it's typing that
+    /// continues where the last edit ended.
+    fn begin(&mut self, anchor: usize, focus: usize, typing: bool) -> Result<(), JsError> {
+        if self.read_only {
+            return Err(JsError::new("the document is read-only"));
+        }
         let merge = typing && anchor == focus && self.last_edit_end == Some(focus);
         self.history
             .before_edit(&self.doc, &self.outline, anchor, focus, merge);
+        Ok(())
     }
 
     fn format(&mut self, anchor: usize, focus: usize, change: FormatChange) -> Result<(), JsError> {
         if anchor == focus {
             let mut f = self.effective_format(anchor, focus);
-            apply_format(&mut f, change);
+            f.apply(change);
+            // A link needs text to sit on; typing at a caret is never linked by a pending
+            // format.
+            f.link = None;
             self.pending = Some((anchor, f));
             return Ok(());
         }
-        self.begin(anchor, focus, false);
+        self.begin(anchor, focus, false)?;
         self.pending = None;
         self.last_edit_end = None;
         Ok(self.doc.format_at(&self.outline, anchor, focus, &change)?)
@@ -1135,7 +1917,7 @@ impl Editor {
         focus: usize,
         change: ParagraphChange,
     ) -> Result<(), JsError> {
-        self.begin(anchor, focus, false);
+        self.begin(anchor, focus, false)?;
         self.last_edit_end = None;
         Ok(self
             .doc
@@ -1222,18 +2004,87 @@ impl Editor {
     }
 }
 
-fn apply_format(f: &mut CharFormat, change: FormatChange) {
-    match change {
-        FormatChange::Bold(b) => f.bold = b,
-        FormatChange::Italic(i) => f.italic = i,
-        FormatChange::Size(s) => f.size = s,
-        FormatChange::Font(n) => f.font = n,
-    }
+/// `#rrggbb` (or `rrggbb`) normalised to lower case; anything else is `None`.
+fn hex_color(s: &str) -> Option<String> {
+    let h = s.trim().trim_start_matches('#');
+    (h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| format!("#{}", h.to_ascii_lowercase()))
+}
+
+fn color_value(s: &Option<String>) -> Option<u32> {
+    s.as_deref()
+        .and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok())
 }
 
 /// Layout spans for a paragraph's formatted runs: char ranges to byte ranges, formats to
 /// text styles. A chosen font goes first in the family list, with the default list after it
 /// so characters that font lacks (Arabic, say) still fall back.
+/// How commented text is highlighted (Google Docs' yellows), and the selected comment's.
+const COMMENT_HIGHLIGHT: &str = "#fff2cc";
+const ACTIVE_COMMENT_HIGHLIGHT: &str = "#ffd966";
+
+/// The open comments' ranges within a paragraph, as char ranges with their highlight colour.
+fn comment_marks(
+    comments: &[Comment],
+    slot: &opendox_model::Slot,
+    active: Option<&str>,
+) -> Vec<(std::ops::Range<usize>, &'static str)> {
+    let end = slot.flat_end();
+    comments
+        .iter()
+        .filter(|c| !c.resolved)
+        .filter_map(|c| {
+            let (s, e) = (c.start.max(slot.flat), c.end.min(end));
+            let color = if active == Some(c.id.as_str()) {
+                ACTIVE_COMMENT_HIGHLIGHT
+            } else {
+                COMMENT_HIGHLIGHT
+            };
+            (s < e).then(|| (s - slot.flat..e - slot.flat, color))
+        })
+        .collect()
+}
+
+/// A paragraph's formatted runs with commented stretches highlighted (where the text has no
+/// highlight of its own), split where the comments start and end.
+fn with_comments(runs: &[FormatRun], marks: &[(std::ops::Range<usize>, &str)]) -> Vec<FormatRun> {
+    if marks.is_empty() {
+        return runs.to_vec();
+    }
+    let mut cuts: Vec<usize> = runs
+        .iter()
+        .flat_map(|r| [r.range.start, r.range.end])
+        .chain(marks.iter().flat_map(|(r, _)| [r.start, r.end]))
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mut format = runs
+            .iter()
+            .find(|r| r.range.start <= a && b <= r.range.end)
+            .map(|r| r.format.clone())
+            .unwrap_or_default();
+        // The selected comment's colour wins where comments overlap.
+        let color = marks
+            .iter()
+            .filter(|(r, _)| r.start <= a && b <= r.end)
+            .map(|(_, c)| *c)
+            .max_by_key(|c| *c == ACTIVE_COMMENT_HIGHLIGHT);
+        if let Some(c) = color {
+            format.highlight.get_or_insert_with(|| c.to_owned());
+        }
+        if format != CharFormat::default() {
+            out.push(FormatRun {
+                range: a..b,
+                format,
+            });
+        }
+    }
+    out
+}
+
 fn style_spans(base: &TextStyle, text: &str, runs: &[FormatRun]) -> Vec<StyleSpan> {
     if runs.is_empty() {
         return Vec::new();
@@ -1248,6 +2099,22 @@ fn style_spans(base: &TextStyle, text: &str, runs: &[FormatRun]) -> Vec<StyleSpa
             let start = *bytes.get(r.range.start)?;
             let end = *bytes.get(r.range.end)?;
             let f = &r.format;
+            let size = f.size.unwrap_or(base.font_size);
+            // Raised or lowered by about a third / a seventh of the text's size, as in Word.
+            let (font_size, baseline_shift) = match f.script {
+                Script::Normal => (size, 0.0),
+                Script::Super => (size * SCRIPT_SCALE, size * 0.33),
+                Script::Sub => (size * SCRIPT_SCALE, -size * 0.14),
+            };
+            let link = f.link.is_some();
+            // A ticked checklist item stays grey whatever colour its text has.
+            let color = if base.strikethrough && base.color == Some(TICKED_COLOR) {
+                base.color
+            } else {
+                color_value(&f.color)
+                    .or(link.then_some(LINK_COLOR))
+                    .or(base.color)
+            };
             Some(StyleSpan {
                 byte_range: start..end,
                 style: TextStyle {
@@ -1255,9 +2122,14 @@ fn style_spans(base: &TextStyle, text: &str, runs: &[FormatRun]) -> Vec<StyleSpa
                         || base.font_family.clone(),
                         |name| format!("{name}, {}", base.font_family),
                     ),
-                    font_size: f.size.unwrap_or(base.font_size),
+                    font_size,
                     font_weight: if f.bold { 700.0 } else { base.font_weight },
-                    italic: f.italic,
+                    italic: f.italic || base.italic,
+                    color,
+                    highlight: color_value(&f.highlight),
+                    underline: f.underline || link,
+                    strikethrough: f.strike || base.strikethrough,
+                    baseline_shift,
                 },
             })
         })
@@ -1320,8 +2192,52 @@ fn layer_code(l: Layer) -> u32 {
     }
 }
 
+fn list_code(kind: Option<ListKind>) -> u32 {
+    match kind {
+        None => 0,
+        Some(ListKind::Bullet) => 1,
+        Some(ListKind::Number) => 2,
+        Some(ListKind::Check) => 3,
+    }
+}
+
+fn list_from(code: u32) -> Option<ListKind> {
+    match code {
+        1 => Some(ListKind::Bullet),
+        2 => Some(ListKind::Number),
+        3 => Some(ListKind::Check),
+        _ => None,
+    }
+}
+
+fn style_code(s: StyleName) -> u32 {
+    match s {
+        StyleName::Normal => 0,
+        StyleName::Title => 1,
+        StyleName::Subtitle => 2,
+        StyleName::Heading(n) => 2 + u32::from(n.clamp(1, 6)),
+    }
+}
+
+fn style_from(code: u32) -> StyleName {
+    match code {
+        1 => StyleName::Title,
+        2 => StyleName::Subtitle,
+        3..=8 => StyleName::Heading((code - 2) as u8),
+        _ => StyleName::Normal,
+    }
+}
+
 fn paragraph_style(f: &ParagraphFormat) -> ParagraphStyle {
+    // A list level indents on top of the paragraph's own indent.
+    let (list_start, list_first) = f.list.map_or((0.0, 0.0), |l| list_indent(l.level));
+    // The style's spacing where the paragraph sets none of its own.
+    let look = f.style.look();
+    let or = |own: f32, style: f32| if own == 0.0 { style } else { own };
     ParagraphStyle {
+        indent_start: f.indent_start + list_start,
+        indent_end: f.indent_end,
+        indent_first: f.indent_first + list_first,
         align: match f.align {
             Align::Left => opendox_layout::Align::Left,
             Align::Center => opendox_layout::Align::Center,
@@ -1329,8 +2245,9 @@ fn paragraph_style(f: &ParagraphFormat) -> ParagraphStyle {
             Align::Justify => opendox_layout::Align::Justify,
         },
         line_spacing: f.line_spacing,
-        space_before: f.space_before,
-        space_after: f.space_after,
+        space_before: or(f.space_before, look.space_before),
+        space_after: or(f.space_after, look.space_after),
+        page_break_before: f.page_break_before,
     }
 }
 
@@ -1578,7 +2495,7 @@ mod tests {
         e.set_bold(6, 10, true).unwrap();
         e.layout();
         assert_eq!(page_fonts(&e), vec![0, bold]);
-        assert_eq!(e.char_format(6, 10), vec![1.0, 0.0, 0.0]);
+        assert_eq!(e.char_format(6, 10), vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(e.char_format(0, 10)[0], 0.0, "mixed selection isn't bold");
 
         // Ctrl+B with nothing selected: nothing changes until text is typed there.
@@ -1595,7 +2512,7 @@ mod tests {
         e.set_italic(3, 3, true).unwrap();
         e.insert(7, "x").unwrap();
         e.layout();
-        assert_eq!(e.char_format(7, 8), vec![0.0, 0.0, 0.0]);
+        assert_eq!(e.char_format(7, 8), vec![0.0; 6]);
     }
 
     #[test]
@@ -1853,5 +2770,30 @@ mod tests {
             "past the line's end"
         );
         assert!(!e.is_over_text(0, 100.0, 150.0), "below the text");
+    }
+
+    #[test]
+    fn heading_style_sets_size_spacing_and_the_outline() {
+        let mut e = editor_with("Intro\nbody text");
+        let first_line_top = |e: &Editor, pos: usize| e.caret_rect(pos, false).unwrap()[2];
+        let body_before = first_line_top(&e, 6);
+        e.set_paragraph_style(6, 6, 3).unwrap(); // heading 1
+        e.layout();
+        assert_eq!(e.paragraph_format(6)[10], 3.0);
+        // 20pt glyphs, and the toolbar reads the style's size for unformatted text.
+        let sizes: Vec<f32> = e
+            .page_glyphs(0)
+            .chunks(GLYPH_STRIDE)
+            .map(|g| g[5])
+            .collect();
+        assert_eq!(sizes.last(), Some(&20.0));
+        assert_eq!(e.char_format(7, 7)[2], 20.0);
+        // Its 20pt space before pushes it down.
+        assert!(first_line_top(&e, 6) >= body_before + 20.0 - 0.01);
+        assert_eq!(e.headings(), vec![6, 1]);
+        // Enter at its end: the new paragraph is normal text again.
+        let end = e.insert(15, "\n").unwrap();
+        e.layout();
+        assert_eq!(e.paragraph_format(end)[10], 0.0);
     }
 }

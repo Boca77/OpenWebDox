@@ -135,7 +135,7 @@ check("Wrap text chosen", p.wrap === "wrap", JSON.stringify(p));
 check("text wraps beside the image", await ev(`(() => { const { editor } = window.opendox;
   const o = editor.page_objects(0); const right = o[2] + o[4];
   const g = editor.page_glyphs(0); let beside = 0;
-  for (let i = 0; i < g.length; i += 6) if (g[i + 4] > o[3] + 12 && g[i + 4] < o[3] + o[5] && g[i + 3] > right) beside++;
+  for (let i = 0; i < g.length; i += 7) if (g[i + 4] > o[3] + 12 && g[i + 4] < o[3] + o[5] && g[i + 3] > right) beside++;
   return beside > 20; })()`));
 
 // 6. Drag the image down and right.

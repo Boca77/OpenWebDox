@@ -21,6 +21,7 @@ fn paginate(texts: &[&str]) -> Paginator {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     };
     let inputs: Vec<ParagraphInput> = texts
         .iter()
@@ -30,6 +31,7 @@ fn paginate(texts: &[&str]) -> Paginator {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         })
         .collect();
     let mut p = Paginator::new(PageGeometry::letter());

@@ -44,6 +44,7 @@ fn pdf_draws_the_picture_where_layout_put_it() {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     };
     let text = format!("Picture: {OBJECT_PLACEHOLDER}");
     let objects = [ObjectInput {
@@ -65,6 +66,7 @@ fn pdf_draws_the_picture_where_layout_put_it() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &objects,
+            marker: None,
         }],
     );
     let placed = paginator.pages()[0].objects[0];
@@ -85,6 +87,8 @@ fn pdf_draws_the_picture_where_layout_put_it() {
         &PdfInfo {
             title: None,
             images: &images,
+            links: &[],
+            headings: &[],
         },
     )
     .unwrap();

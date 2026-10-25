@@ -13,7 +13,7 @@ mod zip;
 
 pub use docx::{docx, DocxOptions};
 pub use image::{adjust, ExportImage};
-pub use pdf::{pdf, PdfInfo};
+pub use pdf::{pdf, PdfHeading, PdfInfo, PdfLink};
 
 use thiserror::Error;
 

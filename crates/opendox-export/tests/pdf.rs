@@ -30,6 +30,7 @@ fn style() -> TextStyle {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     }
 }
 
@@ -58,6 +59,7 @@ fn doc(body: usize) -> Doc {
         spans,
         style: ParagraphStyle::default(),
         objects: &[],
+        marker: None,
     };
     let bold: &'static [StyleSpan] = Box::leak(Box::new(bold));
     let mut blocks = vec![BlockInput::Paragraph(para(0, bold))];
@@ -222,6 +224,7 @@ fn characters_drawn_with_several_glyphs_carry_their_text_once() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         }],
     );
     let fonts = std::mem::replace(engine.fonts_mut(), FontLibrary::new());

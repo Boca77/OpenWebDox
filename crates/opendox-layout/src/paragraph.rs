@@ -20,6 +20,50 @@ pub struct TextStyle {
     /// Uses the family's italic face. Needs one registered: a family without an italic face
     /// is drawn upright (glyphs are never slanted synthetically).
     pub italic: bool,
+    /// Text colour as `0xRRGGBB`; `None` leaves it to the renderer (its ink colour).
+    pub color: Option<u32>,
+    /// Colour drawn behind the text, as `0xRRGGBB`.
+    pub highlight: Option<u32>,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// Points the glyphs are raised (positive) or lowered (negative) from the line's baseline,
+    /// for superscript and subscript. Doesn't change the line's height.
+    pub baseline_shift: f32,
+}
+
+impl Default for TextStyle {
+    /// Regular 12pt text in the first registered family, no decoration.
+    fn default() -> Self {
+        Self {
+            font_family: String::new(),
+            font_size: 12.0,
+            font_weight: 400.0,
+            italic: false,
+            color: None,
+            highlight: None,
+            underline: false,
+            strikethrough: false,
+            baseline_shift: 0.0,
+        }
+    }
+}
+
+/// What parley carries per style span for us: drawing properties it doesn't use itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Paint {
+    color: Option<u32>,
+    highlight: Option<u32>,
+    shift: f32,
+}
+
+impl Paint {
+    fn of(s: &TextStyle) -> Paint {
+        Paint {
+            color: s.color,
+            highlight: s.highlight,
+            shift: s.baseline_shift,
+        }
+    }
 }
 
 /// Horizontal placement of a paragraph's lines.
@@ -41,6 +85,15 @@ pub struct ParagraphStyle {
     pub line_spacing: f32,
     pub space_before: f32,
     pub space_after: f32,
+    /// Where lines start, from the paragraph's left edge.
+    pub indent_start: f32,
+    /// How far lines stop short of the paragraph's right edge.
+    pub indent_end: f32,
+    /// Where the first line starts relative to `indent_start`: negative hangs it out to the
+    /// left (where a list marker goes). Never reaches left of the paragraph's edge.
+    pub indent_first: f32,
+    /// Starts on a new page, unless it's already at the top of one. Ignored in table cells.
+    pub page_break_before: bool,
 }
 
 impl Default for ParagraphStyle {
@@ -50,8 +103,40 @@ impl Default for ParagraphStyle {
             line_spacing: 1.0,
             space_before: 0.0,
             space_after: 0.0,
+            indent_start: 0.0,
+            indent_end: 0.0,
+            indent_first: 0.0,
+            page_break_before: false,
         }
     }
+}
+
+impl ParagraphStyle {
+    fn has_indent(&self) -> bool {
+        self.indent_start != 0.0 || self.indent_end != 0.0 || self.indent_first != 0.0
+    }
+}
+
+/// A list marker ("●", "3.") drawn before a paragraph's first line, at
+/// `indent_start + indent_first`. If it would reach the text, the first line's text moves
+/// right to make room.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marker<'a> {
+    pub text: &'a str,
+    pub style: &'a TextStyle,
+}
+
+/// The smallest gap kept between a marker and its line's text, in points.
+pub const MARKER_GAP: f32 = 4.0;
+
+/// A shaped list marker, in paragraph coordinates, sitting on the first line's baseline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerLayout {
+    pub text: String,
+    /// Glyph runs whose byte ranges and `glyph_text` index into `text`, not the paragraph.
+    pub runs: Vec<GlyphRun>,
+    pub x: f32,
+    pub width: f32,
 }
 
 /// A style applied to part of a paragraph, overriding the paragraph's base style.
@@ -78,6 +163,38 @@ pub enum ObjectMode {
     Behind,
     /// Positioned on the page over the text, which ignores it.
     Front,
+    /// A page number or page count (in a header or footer), or a footnote reference: in the
+    /// line like a character, sized and filled in by pagination.
+    Field(FieldKind),
+}
+
+/// What a [`ObjectMode::Field`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FieldKind {
+    /// The number of the page it's drawn on, from 1.
+    PageNumber,
+    /// How many pages there are.
+    PageCount,
+    /// A footnote reference showing the note's number. Drawn in the style of the text at its
+    /// placeholder (superscript, normally).
+    Note(u32),
+}
+
+impl ObjectMode {
+    /// Whether the object takes its place in the line (an in-line image or a field).
+    pub fn in_line(self) -> bool {
+        matches!(self, ObjectMode::Inline | ObjectMode::Field(_))
+    }
+}
+
+/// One line of text shaped on its own (a list marker, a page number): glyphs relative to its
+/// start and baseline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapedLabel {
+    pub runs: Vec<GlyphRun>,
+    pub width: f32,
+    /// Height above the baseline.
+    pub ascent: f32,
 }
 
 /// An object (an image) anchored in a paragraph. Lengths in points.
@@ -137,6 +254,8 @@ pub struct ParagraphLayout {
     pub width: f32,
     /// Total height: the bottom of the last line.
     pub height: f32,
+    /// The list marker, drawn with the first line.
+    pub marker: Option<MarkerLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,7 +274,33 @@ pub struct Line {
     pub carets: Vec<CaretStop>,
     /// In-line objects on this line, left to right.
     pub objects: Vec<LineObject>,
+    /// Highlights, underlines and strikethroughs, in paragraph coordinates.
+    pub decorations: Vec<Decoration>,
 }
+
+/// What a [`Decoration`] is: drawn behind the text, or over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecorationKind {
+    /// A background behind the text (drawn first).
+    Highlight,
+    Underline,
+    Strikethrough,
+}
+
+/// A filled rectangle drawn with a line's text. Paragraph coordinates, points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Decoration {
+    pub kind: DecorationKind,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// `0xRRGGBB`; `None` is the renderer's ink colour.
+    pub color: Option<u32>,
+}
+
+/// The thinnest underline or strikethrough drawn, in points, whatever the font says.
+const MIN_DECORATION: f32 = 0.5;
 
 /// An in-line object on a line: its bounding box, in paragraph coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -215,6 +360,8 @@ pub struct GlyphRun {
     /// exported PDFs. A ligature's glyph covers all the characters it joins; the extra glyphs
     /// of a character drawn with several share its range.
     pub glyph_text: Vec<Range<usize>>,
+    /// `0xRRGGBB`; `None` is the renderer's ink colour.
+    pub color: Option<u32>,
 }
 
 /// A glyph placed at its baseline origin.
@@ -229,7 +376,7 @@ pub struct Glyph {
 /// Shapes and line-breaks paragraphs. Keep one per document; it reuses allocations between calls.
 pub struct LayoutEngine {
     fonts: FontLibrary,
-    cx: LayoutContext<()>,
+    cx: LayoutContext<Paint>,
 }
 
 impl LayoutEngine {
@@ -287,6 +434,33 @@ impl LayoutEngine {
         objects: &[ObjectInput],
         exclusions: &[Exclusion],
     ) -> ParagraphLayout {
+        self.layout_list_item(text, base, spans, para, width, objects, exclusions, None)
+    }
+
+    /// [`LayoutEngine::layout_paragraph_with`] with a list marker before the first line.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_list_item(
+        &mut self,
+        text: &str,
+        base: &TextStyle,
+        spans: &[StyleSpan],
+        para: &ParagraphStyle,
+        width: f32,
+        objects: &[ObjectInput],
+        exclusions: &[Exclusion],
+        marker: Option<Marker<'_>>,
+    ) -> ParagraphLayout {
+        let marker = marker.and_then(|m| self.shape_marker(m));
+        // Lines go between the indents; the first line may start elsewhere, and after the
+        // marker if the marker would reach its text.
+        let lo = para.indent_start.clamp(0.0, (width - 1.0).max(0.0));
+        let hi = (width - para.indent_end).max(lo + 1.0);
+        let marker_x = (para.indent_start + para.indent_first).max(0.0);
+        let first_x = match &marker {
+            Some((_, w)) => lo.max(marker_x + w + MARKER_GAP),
+            None => marker_x,
+        }
+        .min(hi - 1.0);
         // Objects whose byte really holds a placeholder, with their index in `objects`.
         let objects: Vec<(usize, &ObjectInput)> = objects
             .iter()
@@ -324,7 +498,7 @@ impl LayoutEngine {
             push_style(&mut b, &span.style, span.byte_range.clone());
         }
         for (i, o) in &objects {
-            if o.mode != ObjectMode::Inline {
+            if !o.mode.in_line() {
                 continue;
             }
             let (w, h) = inline_size(o, width);
@@ -339,11 +513,11 @@ impl LayoutEngine {
             });
         }
         let mut layout = b.build(text);
-        if exclusions.is_empty() {
+        if exclusions.is_empty() && !para.has_indent() && marker.is_none() {
             layout.break_all_lines(Some(width));
         } else {
             let guess = base.font_size * 1.4 * para.line_spacing;
-            break_around(&mut layout, width, guess, exclusions);
+            break_around(&mut layout, (lo, hi), first_x, guess, exclusions);
         }
         let alignment = match para.align {
             // Start, not Left: right-to-left paragraphs start on the right.
@@ -360,10 +534,14 @@ impl LayoutEngine {
             .map(|line| {
                 let m = line.metrics();
                 let mut boxes: Vec<LineObject> = Vec::new();
-                let runs = line
-                    .items()
-                    .filter_map(|item| match item {
-                        PositionedLayoutItem::GlyphRun(g) => Some(g),
+                let mut runs: Vec<GlyphRun> = Vec::new();
+                let mut decorations: Vec<Decoration> = Vec::new();
+                // A style change splits a shaped run into pieces, met one after another in
+                // visual order: the whole run's glyph texts, and how many earlier pieces used.
+                let mut texts: Option<(Range<usize>, Vec<Range<usize>>, usize)> = None;
+                for item in line.items() {
+                    let g = match item {
+                        PositionedLayoutItem::GlyphRun(g) => g,
                         PositionedLayoutItem::InlineBox(b) => {
                             boxes.push(LineObject {
                                 object: b.id as usize,
@@ -372,41 +550,60 @@ impl LayoutEngine {
                                 width: b.width,
                                 height: b.height,
                             });
-                            None
+                            continue;
                         }
-                    })
-                    .filter_map(|g| {
-                        let run = g.run();
-                        let font = run.font();
-                        // Every font parley can pick came from our library, so this lookup only
-                        // fails if that invariant breaks; skip the run rather than crash.
-                        let id = self.fonts.id_of(&font.data)?;
-                        let all: Vec<Glyph> = g
-                            .positioned_glyphs()
-                            .map(|gl| Glyph {
-                                id: gl.id,
-                                x: gl.x,
-                                y: gl.y,
-                            })
-                            .collect();
-                        let texts = glyph_text(run, all.len());
-                        // Placeholders draw nothing, whatever glyph the font gave them.
-                        let (glyphs, glyph_text): (Vec<Glyph>, Vec<Range<usize>>) = all
-                            .into_iter()
-                            .zip(texts)
-                            .filter(|(_, t)| !placeholders.contains(&t.start))
-                            .unzip();
-                        (!glyphs.is_empty()).then(|| GlyphRun {
-                            font: id,
-                            face_index: font.index,
-                            font_size: run.font_size(),
-                            byte_range: run.text_range(),
-                            rtl: run.is_rtl(),
-                            glyphs,
-                            glyph_text,
+                    };
+                    let run = g.run();
+                    let key = run.text_range();
+                    let (_, all_texts, used) = match &mut texts {
+                        Some(t) if t.0 == key => t,
+                        t => t.insert((key.clone(), run_glyph_text(run), 0)),
+                    };
+                    let paint = &g.style().brush;
+                    decorate(&mut decorations, &g, paint);
+                    let font = run.font();
+                    // Every font parley can pick came from our library, so this lookup only
+                    // fails if that invariant breaks; skip the run rather than crash.
+                    let Some(id) = self.fonts.id_of(&font.data) else {
+                        continue;
+                    };
+                    let all: Vec<Glyph> = g
+                        .positioned_glyphs()
+                        .map(|gl| Glyph {
+                            id: gl.id,
+                            x: gl.x,
+                            y: gl.y - paint.shift,
                         })
-                    })
-                    .collect();
+                        .collect();
+                    let n = all.len();
+                    // Never seen to fail; if the pieces and the run ever disagree, attribute
+                    // the whole run to every glyph rather than mislabel them.
+                    let piece_texts = all_texts
+                        .get(*used..*used + n)
+                        .map_or_else(|| vec![key.clone(); n], <[_]>::to_vec);
+                    *used += n;
+                    // Placeholders draw nothing, whatever glyph the font gave them.
+                    let (glyphs, glyph_text): (Vec<Glyph>, Vec<Range<usize>>) = all
+                        .into_iter()
+                        .zip(piece_texts)
+                        .filter(|(_, t)| !placeholders.contains(&t.start))
+                        .unzip();
+                    if glyphs.is_empty() {
+                        continue;
+                    }
+                    let byte_range = glyph_text.iter().map(|r| r.start).min().unwrap_or(0)
+                        ..glyph_text.iter().map(|r| r.end).max().unwrap_or(0);
+                    runs.push(GlyphRun {
+                        font: id,
+                        face_index: font.index,
+                        font_size: run.font_size(),
+                        byte_range,
+                        rtl: run.is_rtl(),
+                        glyphs,
+                        glyph_text,
+                        color: paint.color,
+                    });
+                }
                 let box_stops: Vec<(usize, f32, f32)> = boxes
                     .iter()
                     .filter_map(|b| Some((objects.get(b.object)?.1.byte, b.x, b.width)))
@@ -424,15 +621,98 @@ impl LayoutEngine {
                     runs,
                     carets: caret_stops(&line, &box_stops, &placeholders),
                     objects: boxes,
+                    decorations,
                 }
             })
             .collect();
 
+        let marker = marker.and_then(|(mut m, _)| {
+            let baseline = lines.first()?.baseline;
+            for run in &mut m.runs {
+                for g in &mut run.glyphs {
+                    g.x += marker_x;
+                    g.y += baseline;
+                }
+            }
+            m.x = marker_x;
+            Some(m)
+        });
         ParagraphLayout {
             width: layout.width(),
             height: lines.last().map_or(0.0, |l| l.bottom),
             lines,
+            marker,
         }
+    }
+
+    /// Shapes a marker on one line, its glyphs relative to its own start and baseline, and
+    /// returns it with its width.
+    fn shape_marker(&mut self, m: Marker<'_>) -> Option<(MarkerLayout, f32)> {
+        let label = self.shape_label(m.text, m.style)?;
+        Some((
+            MarkerLayout {
+                text: m.text.to_owned(),
+                runs: label.runs,
+                x: 0.0,
+                width: label.width,
+            },
+            label.width,
+        ))
+    }
+
+    /// Shapes `text` as one line in `style`, never broken, raised by its baseline shift.
+    /// `None` for empty text.
+    pub fn shape_label(&mut self, text: &str, style: &TextStyle) -> Option<ShapedLabel> {
+        if text.is_empty() {
+            return None;
+        }
+        let mut b = self.cx.ranged_builder(&mut self.fonts.cx, text, 1.0, false);
+        push_default_style(&mut b, style);
+        let mut layout = b.build(text);
+        layout.break_all_lines(None);
+        let line = layout.lines().next()?;
+        let baseline = line.metrics().baseline;
+        let mut runs = Vec::new();
+        let mut ascent = 0.0f32;
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(g) = item else {
+                continue;
+            };
+            let run = g.run();
+            ascent = ascent.max(run.font_metrics().ascent);
+            let font = run.font();
+            // As for paragraph text: every font parley picks came from our library.
+            let Some(id) = self.fonts.id_of(&font.data) else {
+                continue;
+            };
+            let glyphs: Vec<Glyph> = g
+                .positioned_glyphs()
+                .map(|gl| Glyph {
+                    id: gl.id,
+                    x: gl.x,
+                    y: gl.y - baseline - style.baseline_shift,
+                })
+                .collect();
+            let mut glyph_text = run_glyph_text(run);
+            if glyph_text.len() != glyphs.len() {
+                glyph_text = vec![run.text_range(); glyphs.len()];
+            }
+            runs.push(GlyphRun {
+                font: id,
+                face_index: font.index,
+                font_size: run.font_size(),
+                byte_range: run.text_range(),
+                rtl: run.is_rtl(),
+                glyphs,
+                glyph_text,
+                color: style.color,
+            });
+        }
+        Some(ShapedLabel {
+            runs,
+            width: line.metrics().advance,
+            ascent,
+        })
     }
 }
 
@@ -448,28 +728,32 @@ pub fn inline_size(o: &ObjectInput, line_width: f32) -> (f32, f32) {
     (w * k, h * k)
 }
 
-/// Breaks lines one at a time, giving each line the horizontal gap the exclusions leave at its
-/// height. A line's height is only known once it's broken, so each line is first broken with
-/// the previous line's height as a guess and broken again if its real extent meets different
-/// exclusions.
+/// Breaks lines one at a time between `lo..hi` (the first line from `first_x`), giving each
+/// line the horizontal gap the exclusions leave at its height. A line's height is only known
+/// once it's broken, so each line is first broken with the previous line's height as a guess
+/// and broken again if its real extent meets different exclusions.
 fn break_around(
-    layout: &mut parley::Layout<()>,
-    width: f32,
+    layout: &mut parley::Layout<Paint>,
+    (lo, hi): (f32, f32),
+    first_x: f32,
     first_guess: f32,
     exclusions: &[Exclusion],
 ) {
-    fn place(lines: &mut parley::BreakLines<'_, ()>, (x, w): (f32, f32)) {
+    fn place(lines: &mut parley::BreakLines<'_, Paint>, (x, w): (f32, f32)) {
         let st = lines.state_mut();
         st.set_line_x(x);
         st.set_line_max_advance(w);
     }
     let mut lines = layout.break_lines();
-    lines.state_mut().set_layout_max_advance(width);
+    lines.state_mut().set_layout_max_advance(hi);
     let mut guess = first_guess;
+    let mut first = true;
     // Bounded: every pass commits a line or moves the next line's top down past an exclusion.
     for _ in 0..10_000 {
+        let this_first = first;
+        let bounds = (if first { first_x } else { lo }, hi);
         let y = lines.committed_y() as f32;
-        let span = match free_span(y, y + guess, width, exclusions) {
+        let span = match free_span(y, y + guess, bounds, exclusions) {
             Span::Below(bottom) => {
                 lines.state_mut().set_line_y(f64::from(bottom));
                 continue;
@@ -485,7 +769,8 @@ fn break_around(
         };
         let (top, bottom) = (d.line_y_start as f32, d.line_y_end as f32);
         guess = (bottom - top).max(1.0);
-        match free_span(top, bottom, width, exclusions) {
+        first = false;
+        match free_span(top, bottom, bounds, exclusions) {
             Span::At(x, w) if (x, w) == span => {}
             Span::At(x, w) => {
                 // Broken once more with the gap at its real height, and kept either way.
@@ -499,6 +784,8 @@ fn break_around(
             Span::Below(b) => {
                 if lines.revert() {
                     lines.state_mut().set_line_y(f64::from(b));
+                    // The line was taken back, so the next one tried is the same line.
+                    first = this_first;
                 }
             }
         }
@@ -516,30 +803,30 @@ enum Span {
     Below(f32),
 }
 
-/// The widest stretch of `0..width` that no exclusion covers between `top` and `bottom`.
-fn free_span(top: f32, bottom: f32, width: f32, exclusions: &[Exclusion]) -> Span {
+/// The widest stretch of `lo..hi` that no exclusion covers between `top` and `bottom`.
+fn free_span(top: f32, bottom: f32, (lo, hi): (f32, f32), exclusions: &[Exclusion]) -> Span {
     let hits: Vec<&Exclusion> = exclusions
         .iter()
-        .filter(|e| top < e.bottom && bottom > e.top && e.left < width && e.right > 0.0)
+        .filter(|e| top < e.bottom && bottom > e.top && e.left < hi && e.right > lo)
         .collect();
     if hits.is_empty() {
-        return Span::At(0.0, width);
+        return Span::At(lo, hi - lo);
     }
     let mut blocked: Vec<(f32, f32)> = hits
         .iter()
-        .map(|e| (e.left.max(0.0), e.right.min(width)))
+        .map(|e| (e.left.max(lo), e.right.min(hi)))
         .collect();
     blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut best = (0.0f32, 0.0f32);
-    let mut x = 0.0f32;
+    let mut best = (lo, 0.0f32);
+    let mut x = lo;
     for (l, r) in blocked {
         if l - x > best.1 {
             best = (x, l - x);
         }
         x = x.max(r);
     }
-    if width - x > best.1 {
-        best = (x, width - x);
+    if hi - x > best.1 {
+        best = (x, hi - x);
     }
     if best.1 >= MIN_WRAP_WIDTH {
         return Span::At(best.0, best.1);
@@ -549,9 +836,59 @@ fn free_span(top: f32, bottom: f32, width: f32, exclusions: &[Exclusion]) -> Spa
     Span::Below(lowest.max(top + 0.01))
 }
 
+/// Adds a styled piece's highlight, underline and strikethrough, placed by its font's own
+/// metrics and moved with its baseline shift.
+fn decorate(out: &mut Vec<Decoration>, g: &parley::GlyphRun<'_, Paint>, paint: &Paint) {
+    let style = g.style();
+    let m = g.run().font_metrics();
+    let baseline = g.baseline() - paint.shift;
+    let (x, width) = (g.offset(), g.advance());
+    if width <= 0.0 {
+        return;
+    }
+    if let Some(color) = paint.highlight {
+        out.push(Decoration {
+            kind: DecorationKind::Highlight,
+            x,
+            y: baseline - m.ascent,
+            width,
+            height: m.ascent + m.descent,
+            color: Some(color),
+        });
+    }
+    let lines = [
+        (
+            DecorationKind::Underline,
+            &style.underline,
+            m.underline_offset,
+            m.underline_size,
+        ),
+        (
+            DecorationKind::Strikethrough,
+            &style.strikethrough,
+            m.strikethrough_offset,
+            m.strikethrough_size,
+        ),
+    ];
+    for (kind, deco, offset, size) in lines {
+        let Some(d) = deco else {
+            continue;
+        };
+        // The font's offset is to the top of the stroke, upwards from the baseline.
+        out.push(Decoration {
+            kind,
+            x,
+            y: baseline - d.offset.unwrap_or(offset),
+            width,
+            height: d.size.unwrap_or(size).max(MIN_DECORATION),
+            color: paint.color,
+        });
+    }
+}
+
 /// The text each glyph of `run` draws, in the visual order parley positions glyphs in.
-fn glyph_text(run: &parley::Run<'_, ()>, glyphs: usize) -> Vec<Range<usize>> {
-    let mut out: Vec<Range<usize>> = Vec::with_capacity(glyphs);
+fn run_glyph_text(run: &parley::Run<'_, Paint>) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::new();
     // A cluster with no glyphs is part of a ligature drawn by its logically preceding
     // cluster: the previous one in visual order, or the next one in right-to-left runs.
     let mut pending: Option<Range<usize>> = None;
@@ -571,22 +908,23 @@ fn glyph_text(run: &parley::Run<'_, ()>, glyphs: usize) -> Vec<Range<usize>> {
         }
         out.extend(std::iter::repeat_n(r, n));
     }
-    if out.len() != glyphs {
-        // Never seen; parley documents both walks as producing the same glyphs. If they ever
-        // disagree, attribute the whole run to every glyph rather than mislabel them.
-        return vec![run.text_range(); glyphs];
-    }
     out
 }
 
-fn push_default_style(b: &mut parley::RangedBuilder<'_, ()>, s: &TextStyle) {
+fn push_default_style(b: &mut parley::RangedBuilder<'_, Paint>, s: &TextStyle) {
     b.push_default(StyleProperty::FontFamily(s.font_family.as_str().into()));
     b.push_default(StyleProperty::FontSize(s.font_size));
     b.push_default(StyleProperty::FontWeight(FontWeight::new(s.font_weight)));
     b.push_default(StyleProperty::FontStyle(font_style(s)));
+    b.push_default(StyleProperty::Brush(Paint::of(s)));
+    b.push_default(StyleProperty::Underline(s.underline));
+    b.push_default(StyleProperty::Strikethrough(s.strikethrough));
 }
 
-fn push_style(b: &mut parley::RangedBuilder<'_, ()>, s: &TextStyle, r: Range<usize>) {
+fn push_style(b: &mut parley::RangedBuilder<'_, Paint>, s: &TextStyle, r: Range<usize>) {
+    b.push(StyleProperty::Brush(Paint::of(s)), r.clone());
+    b.push(StyleProperty::Underline(s.underline), r.clone());
+    b.push(StyleProperty::Strikethrough(s.strikethrough), r.clone());
     b.push(
         StyleProperty::FontFamily(s.font_family.as_str().into()),
         r.clone(),
@@ -613,7 +951,7 @@ fn font_style(s: &TextStyle) -> FontStyle {
 /// one sits at its left edge and the caret after it at its right edge. `placeholders` holds the
 /// byte of every object placeholder; they take no width of their own.
 fn caret_stops(
-    line: &parley::Line<'_, ()>,
+    line: &parley::Line<'_, Paint>,
     boxes: &[(usize, f32, f32)],
     placeholders: &[usize],
 ) -> Vec<CaretStop> {

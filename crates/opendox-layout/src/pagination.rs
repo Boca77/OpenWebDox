@@ -1,12 +1,13 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use crate::fonts::FontId;
-use crate::navigation::{PlacedLine, Rect};
+use crate::navigation::{PlacedLine, Rect, Zone};
 use crate::paragraph::{
-    Exclusion, LayoutEngine, Line, ObjectInput, ObjectMode, ParagraphLayout, ParagraphStyle,
-    StyleSpan, TextStyle,
+    Align, DecorationKind, Exclusion, FieldKind, GlyphRun, LayoutEngine, Line, Marker, ObjectInput,
+    ObjectMode, ParagraphLayout, ParagraphStyle, StyleSpan, TextStyle,
 };
 
 /// Space between a cell's border and its text, in points.
@@ -18,6 +19,13 @@ pub const WRAP_MARGIN: f32 = 9.0;
 
 /// Space above and below an object that breaks text, in points.
 pub const BREAK_MARGIN: f32 = 9.0;
+
+/// Space above a page's footnotes, holding the short rule that sets them apart from the body,
+/// in points.
+pub const NOTE_SEPARATOR: f32 = 12.0;
+
+/// Where the separator rule sits within [`NOTE_SEPARATOR`], from its top.
+const NOTE_RULE_Y: f32 = 4.0;
 
 /// How many times a layout is redone so text settles around wrapped objects. Each pass lays
 /// text around the objects where the previous pass put them; documents without wrapped
@@ -33,6 +41,10 @@ pub struct PageGeometry {
     pub margin_bottom: f32,
     pub margin_left: f32,
     pub margin_right: f32,
+    /// From the page's top edge to the header's first line.
+    pub header_distance: f32,
+    /// From the page's bottom edge to the footer's last line.
+    pub footer_distance: f32,
 }
 
 impl PageGeometry {
@@ -54,6 +66,8 @@ impl PageGeometry {
             margin_bottom: 72.0,
             margin_left: 72.0,
             margin_right: 72.0,
+            header_distance: 36.0,
+            footer_distance: 36.0,
         }
     }
 
@@ -77,6 +91,8 @@ pub struct ParagraphInput<'a> {
     /// Objects (images) anchored in the paragraph. In table cells every object is laid out in
     /// line, whatever its mode.
     pub objects: &'a [ObjectInput],
+    /// A list marker before the first line.
+    pub marker: Option<Marker<'a>>,
 }
 
 /// A table as input to pagination: rows of cells, each cell a list of paragraphs. Columns
@@ -84,6 +100,25 @@ pub struct ParagraphInput<'a> {
 #[derive(Debug, Clone)]
 pub struct TableInput<'a> {
     pub rows: Vec<Vec<Vec<ParagraphInput<'a>>>>,
+}
+
+/// A footnote as input to pagination: where its reference is, and the note's paragraphs. The
+/// note goes at the foot of the page holding its reference.
+#[derive(Debug, Clone)]
+pub struct NoteInput<'a> {
+    /// The paragraph holding the reference, numbered as in [`Fragment::paragraph`].
+    pub paragraph: usize,
+    /// UTF-8 byte offset of the reference's placeholder in that paragraph.
+    pub byte: usize,
+    pub paragraphs: Vec<ParagraphInput<'a>>,
+}
+
+/// A footnote after numbering its paragraphs.
+struct NotePlan {
+    paragraph: usize,
+    byte: usize,
+    /// Indices into `Paginator::note_keys`.
+    paragraphs: Range<usize>,
 }
 
 /// One block of the document.
@@ -99,6 +134,20 @@ pub struct Page {
     pub fragments: Vec<Fragment>,
     pub rules: Vec<Rule>,
     pub objects: Vec<PlacedObject>,
+    /// What the header and footer fields and the footnote references show on this page.
+    pub labels: Vec<PlacedLabel>,
+}
+
+/// A field's text as drawn on one page (its page number, say).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedLabel {
+    /// The paragraph and byte offset of the field it fills in.
+    pub paragraph: usize,
+    pub byte: usize,
+    pub text: String,
+    /// Glyph positions in points from the page's top-left corner; byte ranges and
+    /// `glyph_text` index into `text`.
+    pub runs: Vec<GlyphRun>,
 }
 
 /// Where an object is drawn relative to the text.
@@ -167,6 +216,18 @@ pub struct PlacedGlyph {
     pub id: u32,
     pub x: f32,
     pub y: f32,
+    /// `0xRRGGBB`; `None` is the renderer's ink colour.
+    pub color: Option<u32>,
+}
+
+/// A highlight, underline or strikethrough placed on a page: a filled rectangle in points from
+/// the page's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedDecoration {
+    pub kind: DecorationKind,
+    pub rect: Rect,
+    /// `0xRRGGBB`; `None` is the renderer's ink colour.
+    pub color: Option<u32>,
 }
 
 /// What layout needs per block after numbering its paragraphs.
@@ -200,6 +261,23 @@ pub struct Paginator {
     pub(crate) lines: Vec<PlacedLine>,
     /// Index into `lines` of each paragraph's first line.
     pub(crate) first_line: Vec<usize>,
+    /// Paragraph indices of the header's and the footer's paragraphs (after the body's).
+    header: Range<usize>,
+    footer: Range<usize>,
+    /// For each header and footer paragraph, the index into `lines` of its first line on each
+    /// page.
+    margin_first: Vec<Vec<usize>>,
+    /// Which page's copy of the header and footer positions refer to (see
+    /// [`Paginator::set_margin_page`]).
+    margin_page: Cell<usize>,
+    /// Footnotes from the last call, and their paragraphs' layouts (at the content width),
+    /// styles and objects.
+    notes: Vec<NotePlan>,
+    note_keys: Vec<u64>,
+    note_styles: Vec<ParagraphStyle>,
+    note_objects: Vec<Vec<ObjectInput>>,
+    /// Paragraph indices of the footnotes' paragraphs (after the footer's).
+    note_range: Range<usize>,
     last_shaped: usize,
 }
 
@@ -216,8 +294,53 @@ impl Paginator {
             pages: Vec::new(),
             lines: Vec::new(),
             first_line: Vec::new(),
+            header: 0..0,
+            footer: 0..0,
+            margin_first: Vec::new(),
+            margin_page: Cell::new(0),
+            notes: Vec::new(),
+            note_keys: Vec::new(),
+            note_styles: Vec::new(),
+            note_objects: Vec::new(),
+            note_range: 0..0,
             last_shaped: 0,
         }
+    }
+
+    /// Paragraph indices of the footnotes' paragraphs from the last call, in note order.
+    pub fn note_paragraphs(&self) -> Range<usize> {
+        self.note_range.clone()
+    }
+
+    /// Paragraph indices of the header's paragraphs from the last call.
+    pub fn header_paragraphs(&self) -> Range<usize> {
+        self.header.clone()
+    }
+
+    /// Paragraph indices of the footer's paragraphs from the last call.
+    pub fn footer_paragraphs(&self) -> Range<usize> {
+        self.footer.clone()
+    }
+
+    /// The header and footer are on every page, so a position in them is on every page too:
+    /// this picks the page whose copy carets, selections and Up/Down use (the page clicked).
+    pub fn set_margin_page(&self, page: usize) {
+        self.margin_page.set(page);
+    }
+
+    pub(crate) fn is_margin(&self, paragraph: usize) -> bool {
+        self.header.contains(&paragraph) || self.footer.contains(&paragraph)
+    }
+
+    /// Index into `lines` of `paragraph`'s first line, on the margin page for the header and
+    /// footer.
+    pub(crate) fn first_line_of(&self, paragraph: usize) -> Option<usize> {
+        if self.is_margin(paragraph) {
+            let copies = self.margin_first.get(paragraph - self.header.start)?;
+            let page = self.margin_page.get().min(copies.len().saturating_sub(1));
+            return copies.get(page).copied();
+        }
+        self.first_line.get(paragraph).copied()
     }
 
     pub fn geometry(&self) -> &PageGeometry {
@@ -249,6 +372,40 @@ impl Paginator {
 
     /// Lays out paragraphs and tables and splits them into pages.
     pub fn layout_blocks(&mut self, engine: &mut LayoutEngine, blocks: &[BlockInput]) -> &[Page] {
+        self.layout_document(engine, blocks, &[], &[])
+    }
+
+    /// [`Paginator::layout_blocks`] with a header and footer drawn on every page, in the top
+    /// and bottom margins ([`PageGeometry::header_distance`] from the edges). Their paragraphs
+    /// are numbered after the body's, header first. Objects with [`ObjectMode::Field`] show
+    /// each page's number or the page count; everything else in them is laid out in line.
+    pub fn layout_document(
+        &mut self,
+        engine: &mut LayoutEngine,
+        blocks: &[BlockInput],
+        header: &[ParagraphInput],
+        footer: &[ParagraphInput],
+    ) -> &[Page] {
+        self.layout_with_notes(engine, blocks, header, footer, &[])
+    }
+
+    /// [`Paginator::layout_document`] with footnotes. Each note goes at the foot of the page
+    /// holding its reference, which moves to the next page if the note doesn't fit beside it.
+    /// Notes are stacked in the order given, under a short rule; their paragraphs are
+    /// numbered after the footer's. A reference is an object with
+    /// [`ObjectMode::Field`]`(`[`FieldKind::Note`]`)`: it's drawn as its number.
+    ///
+    /// A note is never split across pages: one taller than the space left under its
+    /// reference's line moves that line to a new page, and one taller than a page overlaps
+    /// the body.
+    pub fn layout_with_notes(
+        &mut self,
+        engine: &mut LayoutEngine,
+        blocks: &[BlockInput],
+        header: &[ParagraphInput],
+        footer: &[ParagraphInput],
+        notes: &[NoteInput],
+    ) -> &[Page] {
         let content = self.geometry.content_width();
         // Number every paragraph in reading order and note the width it's laid out at.
         let mut inputs: Vec<(ParagraphInput, f32)> = Vec::new();
@@ -259,7 +416,7 @@ impl Paginator {
             match block {
                 BlockInput::Paragraph(p) => {
                     inputs.push((*p, content));
-                    self.objects.push(p.objects.to_vec());
+                    self.objects.push(size_references(engine, p, false));
                     self.in_cell.push(false);
                     self.plan.push(Plan::Paragraph(inputs.len() - 1));
                 }
@@ -273,11 +430,7 @@ impl Paginator {
                             let start = inputs.len();
                             for p in cell {
                                 inputs.push((*p, width));
-                                let inline = p.objects.iter().map(|o| ObjectInput {
-                                    mode: ObjectMode::Inline,
-                                    ..*o
-                                });
-                                self.objects.push(inline.collect());
+                                self.objects.push(size_references(engine, p, true));
                                 self.in_cell.push(true);
                             }
                             cells.push(start..inputs.len());
@@ -293,6 +446,45 @@ impl Paginator {
 
         let mut old = std::mem::take(&mut self.cache);
         let mut fresh: HashMap<u64, ParagraphLayout> = HashMap::with_capacity(inputs.len());
+        // Notes don't wrap around anything, so they're laid out once, before the passes.
+        self.notes.clear();
+        self.note_keys.clear();
+        self.note_styles.clear();
+        self.note_objects.clear();
+        for n in notes {
+            let start = self.note_keys.len();
+            for p in &n.paragraphs {
+                let objects = size_references(engine, p, true);
+                let key = cache_key(p, content, &objects, &[]);
+                if let std::collections::hash_map::Entry::Vacant(slot) = fresh.entry(key) {
+                    let layout = match old.remove(&key) {
+                        Some(l) => l,
+                        None => {
+                            self.last_shaped += 1;
+                            engine.layout_list_item(
+                                p.text,
+                                p.base,
+                                p.spans,
+                                &p.style,
+                                content,
+                                &objects,
+                                &[],
+                                p.marker,
+                            )
+                        }
+                    };
+                    slot.insert(layout);
+                }
+                self.note_keys.push(key);
+                self.note_styles.push(p.style);
+                self.note_objects.push(objects);
+            }
+            self.notes.push(NotePlan {
+                paragraph: n.paragraph,
+                byte: n.byte,
+                paragraphs: start..self.note_keys.len(),
+            });
+        }
         let mut exclusions: Vec<Vec<Exclusion>> = vec![Vec::new(); inputs.len()];
         let mut pass = 0;
         let stacked = loop {
@@ -308,7 +500,7 @@ impl Paginator {
                     Some(l) => l,
                     None => {
                         self.last_shaped += 1;
-                        engine.layout_paragraph_with(
+                        engine.layout_list_item(
                             p.text,
                             p.base,
                             p.spans,
@@ -316,6 +508,7 @@ impl Paginator {
                             *width,
                             objects,
                             &exclusions[i],
+                            p.marker,
                         )
                     }
                 };
@@ -334,6 +527,12 @@ impl Paginator {
             exclusions = next;
             fresh = std::mem::take(&mut self.cache);
         };
+        let mut stacked = stacked;
+        self.place_references(engine, &inputs, &mut stacked.pages);
+        self.place_margins(engine, &mut stacked, &mut old, header, footer);
+        self.place_notes(&mut stacked);
+        let notes = self.note_range.clone();
+        self.place_inline_objects(&mut stacked.pages, notes);
         // Dropping entries not used this call keeps memory proportional to the document.
         let used: HashSet<u64> = self.keys.iter().copied().collect();
         self.cache.retain(|k, _| used.contains(k));
@@ -341,6 +540,332 @@ impl Paginator {
         self.lines = stacked.lines;
         self.first_line = stacked.first_line;
         &self.pages
+    }
+
+    /// Lays out the header and footer (now that the page count is known) and places them
+    /// on every page, with each page's field labels.
+    fn place_margins(
+        &mut self,
+        engine: &mut LayoutEngine,
+        stacked: &mut Stacked,
+        old: &mut HashMap<u64, ParagraphLayout>,
+        header: &[ParagraphInput],
+        footer: &[ParagraphInput],
+    ) {
+        let start = self.keys.len();
+        self.header = start..start + header.len();
+        self.footer = self.header.end..self.header.end + footer.len();
+        let mut margin_first: Vec<Vec<usize>> = vec![Vec::new(); header.len() + footer.len()];
+        let count = stacked.pages.len();
+        let width = self.geometry.content_width();
+        // Every number takes the room of the widest (Noto's digits all have one width).
+        let widest = "0".repeat(count.to_string().len());
+        for p in header.iter().chain(footer) {
+            let objects: Vec<ObjectInput> = p
+                .objects
+                .iter()
+                .map(|o| match o.mode {
+                    ObjectMode::Field(_) => {
+                        let style = style_at(p, o.byte);
+                        let size = engine.shape_label(&widest, style);
+                        ObjectInput {
+                            width: size.as_ref().map_or(0.0, |s| s.width),
+                            height: size.as_ref().map_or(0.0, |s| s.ascent),
+                            rotation: 0.0,
+                            ..*o
+                        }
+                    }
+                    _ => ObjectInput {
+                        mode: ObjectMode::Inline,
+                        ..*o
+                    },
+                })
+                .collect();
+            let key = cache_key(p, width, &objects, &[]);
+            if !self.cache.contains_key(&key) {
+                let layout = match old.remove(&key) {
+                    Some(l) => l,
+                    None => {
+                        self.last_shaped += 1;
+                        engine.layout_list_item(
+                            p.text,
+                            p.base,
+                            p.spans,
+                            &p.style,
+                            width,
+                            &objects,
+                            &[],
+                            p.marker,
+                        )
+                    }
+                };
+                self.cache.insert(key, layout);
+            }
+            self.keys.push(key);
+            self.styles.push(p.style);
+            self.objects.push(objects);
+            self.in_cell.push(true);
+            stacked.first_line.push(0);
+        }
+        let g = self.geometry;
+        let left = g.margin_left;
+        let mut labels: HashMap<String, Option<(Vec<GlyphRun>, f32)>> = HashMap::new();
+        for page in 0..count {
+            for (zone, range) in [
+                (Zone::Header, self.header.clone()),
+                (Zone::Footer, self.footer.clone()),
+            ] {
+                // Heights with spacing, so the footer can end at its distance from the bottom.
+                let mut total = 0.0;
+                for i in range.clone() {
+                    let st = self.style(i);
+                    let h = self.paragraph(i).map_or(0.0, |p| p.height);
+                    total += st.space_before + h + st.space_after;
+                }
+                let mut y = match zone {
+                    Zone::Header => g.header_distance,
+                    _ => g.height - g.footer_distance - total,
+                };
+                for i in range {
+                    let st = self.style(i);
+                    y += st.space_before;
+                    let Some(para) = self.paragraph(i) else {
+                        continue;
+                    };
+                    let Some(first) = para.lines.first() else {
+                        continue;
+                    };
+                    let top = y;
+                    let dy = top - first.top;
+                    margin_first[i - start].push(stacked.lines.len());
+                    for (n, line) in para.lines.iter().enumerate() {
+                        let (lt, lb) = (dy + line.top, dy + line.bottom);
+                        stacked.lines.push(PlacedLine {
+                            page,
+                            paragraph: i,
+                            line: n,
+                            top: lt,
+                            bottom: lb,
+                            left,
+                            width,
+                            region: Rect {
+                                x: left,
+                                y: lt,
+                                width,
+                                height: lb - lt,
+                            },
+                            zone,
+                        });
+                        for b in &line.objects {
+                            let Some(ObjectMode::Field(kind)) =
+                                self.objects[i].get(b.object).map(|o| o.mode)
+                            else {
+                                continue;
+                            };
+                            let text = match kind {
+                                FieldKind::PageNumber => (page + 1).to_string(),
+                                FieldKind::PageCount => count.to_string(),
+                                FieldKind::Note(n) => n.to_string(),
+                            };
+                            let input = &header.iter().chain(footer).nth(i - start);
+                            let Some(p) = input else {
+                                continue;
+                            };
+                            let byte = self.objects[i][b.object].byte;
+                            let runs = labels
+                                .entry(text.clone())
+                                .or_insert_with(|| {
+                                    engine
+                                        .shape_label(&text, style_at(p, byte))
+                                        .map(|l| (l.runs, l.width))
+                                })
+                                .clone();
+                            let Some((mut runs, label_width)) = runs else {
+                                continue;
+                            };
+                            // Shorter numbers sit where the paragraph's alignment puts them.
+                            let spare = (b.width - label_width).max(0.0);
+                            let shift = match st.align {
+                                Align::Right => spare,
+                                Align::Center => spare / 2.0,
+                                Align::Left | Align::Justify => 0.0,
+                            };
+                            for r in &mut runs {
+                                for gl in &mut r.glyphs {
+                                    gl.x += left + b.x + shift;
+                                    gl.y += dy + line.baseline;
+                                }
+                            }
+                            if let Some(pg) = stacked.pages.get_mut(page) {
+                                pg.labels.push(PlacedLabel {
+                                    paragraph: i,
+                                    byte,
+                                    text,
+                                    runs,
+                                });
+                            }
+                        }
+                    }
+                    if let Some(pg) = stacked.pages.get_mut(page) {
+                        pg.fragments.push(Fragment {
+                            paragraph: i,
+                            lines: 0..para.lines.len(),
+                            top,
+                            left,
+                        });
+                    }
+                    y += para.height + st.space_after;
+                }
+            }
+        }
+        for (k, copies) in margin_first.iter().enumerate() {
+            if let (Some(first), Some(slot)) =
+                (copies.first(), stacked.first_line.get_mut(start + k))
+            {
+                *slot = *first;
+            }
+        }
+        self.margin_first = margin_first;
+    }
+
+    /// Draws each footnote reference in the body as its number, where its line was placed.
+    fn place_references(
+        &self,
+        engine: &mut LayoutEngine,
+        inputs: &[(ParagraphInput, f32)],
+        pages: &mut [Page],
+    ) {
+        for page in pages {
+            let mut found = Vec::new();
+            for f in &page.fragments {
+                let (Some(para), Some((input, _))) =
+                    (self.paragraph(f.paragraph), inputs.get(f.paragraph))
+                else {
+                    continue;
+                };
+                let Some(first) = para.lines.get(f.lines.start) else {
+                    continue;
+                };
+                let dy = f.top - first.top;
+                for line in &para.lines[f.lines.clone()] {
+                    for b in &line.objects {
+                        let Some(o) = self.objects.get(f.paragraph).and_then(|v| v.get(b.object))
+                        else {
+                            continue;
+                        };
+                        let ObjectMode::Field(FieldKind::Note(n)) = o.mode else {
+                            continue;
+                        };
+                        let text = n.to_string();
+                        let Some(label) = engine.shape_label(&text, style_at(input, o.byte)) else {
+                            continue;
+                        };
+                        let mut runs = label.runs;
+                        for r in &mut runs {
+                            for gl in &mut r.glyphs {
+                                gl.x += f.left + b.x;
+                                gl.y += dy + line.baseline;
+                            }
+                        }
+                        found.push(PlacedLabel {
+                            paragraph: f.paragraph,
+                            byte: o.byte,
+                            text,
+                            runs,
+                        });
+                    }
+                }
+            }
+            page.labels.extend(found);
+        }
+    }
+
+    /// Total height of footnote `k`'s paragraphs with their spacing.
+    fn note_height(&self, k: usize) -> f32 {
+        self.notes[k]
+            .paragraphs
+            .clone()
+            .map(|j| {
+                let st = self.note_styles[j];
+                let h = self.cache.get(&self.note_keys[j]).map_or(0.0, |p| p.height);
+                st.space_before + h + st.space_after
+            })
+            .sum()
+    }
+
+    /// Numbers the footnotes' paragraphs after the footer's and places each page's notes at
+    /// its foot, under a rule a third of the text's width, in reference order.
+    fn place_notes(&mut self, stacked: &mut Stacked) {
+        let start = self.keys.len();
+        self.note_range = start..start + self.note_keys.len();
+        for j in 0..self.note_keys.len() {
+            self.keys.push(self.note_keys[j]);
+            self.styles.push(self.note_styles[j]);
+            self.objects.push(self.note_objects[j].clone());
+            self.in_cell.push(true);
+            stacked.first_line.push(0);
+        }
+        let g = self.geometry;
+        let (left, width) = (g.margin_left, g.content_width());
+        let bottom = g.margin_top + g.content_height();
+        for page in 0..stacked.pages.len() {
+            let here: Vec<usize> = (0..self.notes.len())
+                .filter(|&k| stacked.note_page.get(k).copied().flatten() == Some(page))
+                .collect();
+            if here.is_empty() {
+                continue;
+            }
+            let total = NOTE_SEPARATOR + here.iter().map(|&k| self.note_height(k)).sum::<f32>();
+            let mut y = bottom - total;
+            stacked.pages[page].rules.push(Rule {
+                x0: left,
+                y0: y + NOTE_RULE_Y,
+                x1: left + width / 3.0,
+                y1: y + NOTE_RULE_Y,
+            });
+            y += NOTE_SEPARATOR;
+            for &k in &here {
+                for j in self.notes[k].paragraphs.clone() {
+                    let i = start + j;
+                    let st = self.style(i);
+                    y += st.space_before;
+                    let Some(para) = self.paragraph(i) else {
+                        continue;
+                    };
+                    let Some(first) = para.lines.first() else {
+                        continue;
+                    };
+                    let dy = y - first.top;
+                    stacked.first_line[i] = stacked.lines.len();
+                    for (n, line) in para.lines.iter().enumerate() {
+                        let (lt, lb) = (dy + line.top, dy + line.bottom);
+                        stacked.lines.push(PlacedLine {
+                            page,
+                            paragraph: i,
+                            line: n,
+                            top: lt,
+                            bottom: lb,
+                            left,
+                            width,
+                            region: Rect {
+                                x: left,
+                                y: lt,
+                                width,
+                                height: lb - lt,
+                            },
+                            zone: Zone::Footnote,
+                        });
+                    }
+                    stacked.pages[page].fragments.push(Fragment {
+                        paragraph: i,
+                        lines: 0..para.lines.len(),
+                        top: y,
+                        left,
+                    });
+                    y += para.height + st.space_after;
+                }
+            }
+        }
     }
 
     /// Pages from the last layout call.
@@ -372,33 +897,97 @@ impl Paginator {
                 continue;
             };
             let dy = f.top - first.top;
-            for line in &para.lines[f.lines.clone()] {
-                for run in &line.runs {
-                    out.extend(run.glyphs.iter().map(|g| PlacedGlyph {
-                        font: run.font,
-                        face_index: run.face_index,
-                        font_size: run.font_size,
-                        id: g.id,
-                        x: f.left + g.x,
-                        y: dy + g.y,
-                    }));
-                }
+            let marker = para
+                .marker
+                .as_ref()
+                .filter(|_| f.lines.start == 0)
+                .map(|m| m.runs.as_slice())
+                .unwrap_or_default();
+            let runs = para.lines[f.lines.clone()]
+                .iter()
+                .flat_map(|line| &line.runs)
+                .chain(marker);
+            for run in runs {
+                out.extend(run.glyphs.iter().map(|g| PlacedGlyph {
+                    font: run.font,
+                    face_index: run.face_index,
+                    font_size: run.font_size,
+                    id: g.id,
+                    x: f.left + g.x,
+                    y: dy + g.y,
+                    color: run.color,
+                }));
             }
         }
+        for run in page.labels.iter().flat_map(|l| &l.runs) {
+            out.extend(run.glyphs.iter().map(|g| PlacedGlyph {
+                font: run.font,
+                face_index: run.face_index,
+                font_size: run.font_size,
+                id: g.id,
+                x: g.x,
+                y: g.y,
+                color: run.color,
+            }));
+        }
+        out
+    }
+
+    /// Every highlight, underline and strikethrough on page `index`, highlights first (they go
+    /// behind the text), in points from the page's top-left corner.
+    pub fn placed_decorations(&self, index: usize) -> Vec<PlacedDecoration> {
+        let mut out = Vec::new();
+        let Some(page) = self.pages.get(index) else {
+            return out;
+        };
+        for f in &page.fragments {
+            let Some(para) = self.paragraph(f.paragraph) else {
+                continue;
+            };
+            let Some(first) = para.lines.get(f.lines.start) else {
+                continue;
+            };
+            let dy = f.top - first.top;
+            for d in para.lines[f.lines.clone()]
+                .iter()
+                .flat_map(|l| &l.decorations)
+            {
+                out.push(PlacedDecoration {
+                    kind: d.kind,
+                    rect: Rect {
+                        x: f.left + d.x,
+                        y: dy + d.y,
+                        width: d.width,
+                        height: d.height,
+                    },
+                    color: d.color,
+                });
+            }
+        }
+        out.sort_by_key(|d| d.kind != DecorationKind::Highlight);
         out
     }
 
     fn stack(&self) -> Stacked {
         let g = self.geometry;
+        let mut anchors: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        for (k, n) in self.notes.iter().enumerate() {
+            anchors.entry(n.paragraph).or_default().push((n.byte, k));
+        }
         let mut s = Stacker {
             out: Stacked {
                 pages: vec![Page::default()],
                 lines: Vec::new(),
                 first_line: vec![0; self.keys.len()],
                 wraps: Vec::new(),
+                note_page: vec![None; self.notes.len()],
             },
             y: g.margin_top,
             g,
+            notes_h: 0.0,
+            has_notes: false,
+            note_heights: (0..self.notes.len()).map(|k| self.note_height(k)).collect(),
+            anchors,
         };
         for block in &self.plan {
             match block {
@@ -406,15 +995,25 @@ impl Paginator {
                 Plan::Table(rows) => self.stack_table(&mut s, rows),
             }
         }
-        self.place_inline_objects(&mut s.out.pages);
+        // A note whose reference wasn't found still needs a place to be edited.
+        let last = s.page();
+        for p in &mut s.out.note_page {
+            p.get_or_insert(last);
+        }
+        self.place_inline_objects(&mut s.out.pages, 0..usize::MAX);
         s.out
     }
 
-    /// Adds every in-line object to its page, where its line was placed.
-    fn place_inline_objects(&self, pages: &mut [Page]) {
+    /// Adds the in-line objects of paragraphs in `paragraphs` to their pages, where their lines
+    /// were placed.
+    fn place_inline_objects(&self, pages: &mut [Page], paragraphs: Range<usize>) {
         for page in pages {
             let mut found = Vec::new();
-            for f in &page.fragments {
+            for f in page
+                .fragments
+                .iter()
+                .filter(|f| paragraphs.contains(&f.paragraph))
+            {
                 let Some(para) = self.paragraph(f.paragraph) else {
                     continue;
                 };
@@ -513,6 +1112,9 @@ impl Paginator {
         let width = s.g.content_width();
         let style = self.style(index);
         let objects = self.objects.get(index).map_or(&[][..], Vec::as_slice);
+        if style.page_break_before && s.y > s.g.margin_top {
+            s.new_page();
+        }
         let mut start = 0;
         // Page and y of the paragraph's first line: what positioned objects are measured from.
         let mut top: Option<(usize, f32)> = None;
@@ -554,7 +1156,9 @@ impl Paginator {
                 s.place_on(page, index, k, o, x, s.y, Layer::Text);
                 s.y += fh + BREAK_MARGIN;
             }
-            if s.needs_break(pre + gap + h) {
+            // The line's footnotes must fit on its page too.
+            let notes = s.notes_on(index, line, last);
+            if s.needs_break(pre + gap + h + s.notes_extra(&notes)) {
                 s.push_fragment(index, start..i, para, left);
                 s.new_page();
                 start = i;
@@ -584,8 +1188,10 @@ impl Paginator {
                     width,
                     height: h,
                 },
+                zone: Zone::Body,
             });
             s.y += h;
+            s.add_notes(&notes);
         }
         s.push_fragment(index, start..para.lines.len(), para, left);
         // Space after may run past the bottom margin; the next block then starts a new page.
@@ -596,7 +1202,7 @@ impl Paginator {
         };
         for (k, o) in objects.iter().enumerate() {
             let layer = match o.mode {
-                ObjectMode::Inline | ObjectMode::Break => continue,
+                ObjectMode::Inline | ObjectMode::Break | ObjectMode::Field(_) => continue,
                 ObjectMode::Wrap => Layer::Text,
                 ObjectMode::Behind => Layer::Behind,
                 ObjectMode::Front => Layer::Front,
@@ -638,14 +1244,15 @@ impl Paginator {
         }
         let col_width = s.g.content_width() / cols as f32;
         let text_width = cell_text_width(s.g.content_width(), cols);
-        let limit = s.g.margin_top + s.g.content_height();
 
         for row in rows {
             let cells: Vec<Vec<CellLine>> = row.iter().map(|cell| self.cell_lines(cell)).collect();
             let mut next = vec![0usize; cells.len()];
 
             while cells.iter().zip(&next).any(|(c, &n)| n < c.len()) {
-                let room = limit - s.y - 2.0 * CELL_PADDING;
+                // Footnotes of lines placed so far on this page shorten it; those of this
+                // piece's own lines are added once it's placed.
+                let room = s.limit() - s.y - 2.0 * CELL_PADDING;
                 let mut take: Vec<usize> = cells
                     .iter()
                     .zip(&next)
@@ -665,6 +1272,7 @@ impl Paginator {
 
                 let top = s.y;
                 let page = s.page();
+                let mut piece_notes: Vec<usize> = Vec::new();
                 let content = cells
                     .iter()
                     .zip(&next)
@@ -679,7 +1287,7 @@ impl Paginator {
                 // A piece that continues on the next page reaches down to the bottom margin,
                 // as in Google Docs, so the table visibly runs off the page.
                 let height = if continues {
-                    (limit - top).max(content + 2.0 * CELL_PADDING)
+                    (s.limit() - top).max(content + 2.0 * CELL_PADDING)
                 } else {
                     content + 2.0 * CELL_PADDING
                 };
@@ -700,6 +1308,12 @@ impl Paginator {
                     // top, line count).
                     let mut pieces: Vec<(usize, usize, f32, usize)> = Vec::new();
                     for l in placed {
+                        if let Some(p) = self.paragraph(l.paragraph) {
+                            if let Some(line) = p.lines.get(l.line) {
+                                let last = l.line + 1 == p.lines.len();
+                                piece_notes.extend(s.notes_on(l.paragraph, line, last));
+                            }
+                        }
                         y += l.before;
                         if l.line == 0 {
                             s.out.first_line[l.paragraph] = s.out.lines.len();
@@ -713,6 +1327,7 @@ impl Paginator {
                             left,
                             width: text_width,
                             region,
+                            zone: Zone::Body,
                         });
                         match pieces.last_mut() {
                             Some(p) if p.0 == l.paragraph => p.3 += 1,
@@ -734,6 +1349,7 @@ impl Paginator {
                 }
 
                 s.push_borders(top, top + height, cols, col_width);
+                s.add_notes(&piece_notes);
                 s.y = top + height;
                 if cells.iter().zip(&next).any(|(c, &n)| n < c.len()) {
                     s.new_page();
@@ -804,6 +1420,8 @@ struct Stacked {
     first_line: Vec<usize>,
     /// Wrapped objects plus their margin: `(page, area)`.
     wraps: Vec<(usize, Rect)>,
+    /// The page each footnote goes on.
+    note_page: Vec<Option<usize>>,
 }
 
 /// Whether `line` holds the placeholder at `byte`. The last line also holds a placeholder at
@@ -818,6 +1436,12 @@ struct Stacker {
     out: Stacked,
     y: f32,
     g: PageGeometry,
+    /// Height taken at the foot of this page by its footnotes, separator included.
+    notes_h: f32,
+    has_notes: bool,
+    note_heights: Vec<f32>,
+    /// For each paragraph holding footnote references: `(byte, note)`.
+    anchors: HashMap<usize, Vec<(usize, usize)>>,
 }
 
 impl Stacker {
@@ -825,10 +1449,48 @@ impl Stacker {
         self.out.pages.len() - 1
     }
 
+    /// Where body text on this page must end: above its footnotes.
+    fn limit(&self) -> f32 {
+        self.g.margin_top + self.g.content_height() - self.notes_h
+    }
+
     /// Whether something `h` tall must go on a new page. Only if something is already on this
     /// page: anything taller than a page goes on an empty page rather than moving on forever.
     fn needs_break(&self, h: f32) -> bool {
-        self.y + h > self.g.margin_top + self.g.content_height() && self.y > self.g.margin_top
+        self.y + h > self.limit() && self.y > self.g.margin_top
+    }
+
+    /// The footnotes referenced on `line` of `paragraph` that aren't placed yet.
+    fn notes_on(&self, paragraph: usize, line: &Line, last: bool) -> Vec<usize> {
+        self.anchors.get(&paragraph).map_or_else(Vec::new, |refs| {
+            refs.iter()
+                .filter(|&&(byte, k)| holds(line, byte, last) && self.out.note_page[k].is_none())
+                .map(|&(_, k)| k)
+                .collect()
+        })
+    }
+
+    /// The room footnotes `notes` would take on this page, with the separator if they're
+    /// its first.
+    fn notes_extra(&self, notes: &[usize]) -> f32 {
+        if notes.is_empty() {
+            return 0.0;
+        }
+        let separator = if self.has_notes { 0.0 } else { NOTE_SEPARATOR };
+        separator + notes.iter().map(|&k| self.note_heights[k]).sum::<f32>()
+    }
+
+    /// Puts footnotes `notes` on this page.
+    fn add_notes(&mut self, notes: &[usize]) {
+        if notes.is_empty() {
+            return;
+        }
+        self.notes_h += self.notes_extra(notes);
+        self.has_notes = true;
+        let page = self.page();
+        for &k in notes {
+            self.out.note_page[k] = Some(page);
+        }
     }
 
     /// Borders around one row piece: top, bottom and every column edge.
@@ -865,6 +1527,8 @@ impl Stacker {
     fn new_page(&mut self) {
         self.out.pages.push(Page::default());
         self.y = self.g.margin_top;
+        self.notes_h = 0.0;
+        self.has_notes = false;
     }
 
     /// Places an object with its bounding box's top-left corner at `(x, y)` on `page`.
@@ -925,6 +1589,44 @@ impl Stacker {
     }
 }
 
+/// A paragraph's objects, footnote references sized to their numbers. In table cells (and
+/// footnotes) everything else is laid out in line, whatever its mode.
+fn size_references(
+    engine: &mut LayoutEngine,
+    p: &ParagraphInput,
+    in_line: bool,
+) -> Vec<ObjectInput> {
+    p.objects
+        .iter()
+        .map(|o| match o.mode {
+            ObjectMode::Field(FieldKind::Note(n)) => {
+                let label = engine.shape_label(&n.to_string(), style_at(p, o.byte));
+                ObjectInput {
+                    width: label.as_ref().map_or(0.0, |l| l.width),
+                    height: label.as_ref().map_or(0.0, |l| l.ascent),
+                    rotation: 0.0,
+                    ..*o
+                }
+            }
+            ObjectMode::Field(_) => *o,
+            _ if in_line => ObjectInput {
+                mode: ObjectMode::Inline,
+                ..*o
+            },
+            _ => *o,
+        })
+        .collect()
+}
+
+/// The style of the text at `byte` of a paragraph: the last span covering it, else its base.
+fn style_at<'a>(p: &ParagraphInput<'a>, byte: usize) -> &'a TextStyle {
+    p.spans
+        .iter()
+        .rev()
+        .find(|s| s.byte_range.start <= byte && byte < s.byte_range.end)
+        .map_or(p.base, |s| &s.style)
+}
+
 fn column_count(t: &TableInput) -> usize {
     t.rows.iter().map(Vec::len).max().unwrap_or(0)
 }
@@ -950,12 +1652,23 @@ fn cache_key(
     // Space before/after is applied while stacking and doesn't change the paragraph's shape.
     p.style.align.hash(&mut h);
     p.style.line_spacing.to_bits().hash(&mut h);
+    for v in [
+        p.style.indent_start,
+        p.style.indent_end,
+        p.style.indent_first,
+    ] {
+        v.to_bits().hash(&mut h);
+    }
+    if let Some(m) = &p.marker {
+        m.text.hash(&mut h);
+        hash_style(m.style, &mut h);
+    }
     width.to_bits().hash(&mut h);
     // Only what changes the lines: in-line objects' boxes and where the others sit in the text.
     for o in objects {
         o.byte.hash(&mut h);
         o.mode.hash(&mut h);
-        if o.mode == ObjectMode::Inline {
+        if o.mode.in_line() {
             let (w, ht) = o.footprint();
             w.to_bits().hash(&mut h);
             ht.to_bits().hash(&mut h);
@@ -974,4 +1687,9 @@ fn hash_style(s: &TextStyle, h: &mut impl Hasher) {
     s.font_size.to_bits().hash(h);
     s.font_weight.to_bits().hash(h);
     s.italic.hash(h);
+    s.color.hash(h);
+    s.highlight.hash(h);
+    s.underline.hash(h);
+    s.strikethrough.hash(h);
+    s.baseline_shift.to_bits().hash(h);
 }

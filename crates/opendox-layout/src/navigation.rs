@@ -42,6 +42,18 @@ pub struct PlacedLine {
     /// Area a click selects this line from: the line itself for body text, the whole cell for
     /// text in a table.
     pub region: Rect,
+    /// Whether the line is in the body, the header, the footer or the footnotes.
+    pub zone: Zone,
+}
+
+/// Which part of the page a line is in. Up and Down never leave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Zone {
+    Body,
+    Header,
+    Footer,
+    /// The footnotes at the foot of the page.
+    Footnote,
 }
 
 impl PlacedLine {
@@ -143,6 +155,10 @@ impl Paginator {
     ) -> Option<TextPosition> {
         let cur = &self.lines[self.line_index(pos)?];
         let beyond = |l: &&PlacedLine| {
+            // A header or footer's lines on its own page only.
+            if l.zone != cur.zone || (cur.zone != Zone::Body && l.page != cur.page) {
+                return false;
+            }
             if down {
                 l.page > cur.page || (l.page == cur.page && l.top >= cur.bottom - EPSILON)
             } else {
@@ -268,7 +284,7 @@ impl Paginator {
 
     /// Index into `lines` of the line holding `pos`, using `upstream` at wrap points.
     fn line_index(&self, pos: TextPosition) -> Option<usize> {
-        let first = *self.first_line.get(pos.paragraph)?;
+        let first = self.first_line_of(pos.paragraph)?;
         let para = self.paragraph(pos.paragraph)?;
         let mut found = None;
         for (i, line) in para.lines.iter().enumerate() {

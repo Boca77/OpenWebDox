@@ -9,8 +9,14 @@
     "build:wasm": "wasm-pack build crates/opendox-wasm --target web --profile wasm-release",
     "build": "npm run build:wasm && npm run build -w @opendox/editor",
     "serve": "node scripts/serve.mjs",
+    "fetch-fonts": "node scripts/fetch-fonts.mjs",
     "e2e": "node scripts/e2e.mjs",
     "e2e:images": "node scripts/e2e-images.mjs",
+    "e2e:lists": "node scripts/e2e-lists.mjs",
+    "e2e:formats": "node scripts/e2e-formats.mjs",
+    "e2e:pages": "node scripts/e2e-pages.mjs",
+    "e2e:editing": "node scripts/e2e-editing.mjs",
+    "e2e:comments": "node scripts/e2e-comments.mjs",
     "sync-server": "cargo run -p opendox-server --release --",
     "e2e:collab": "node scripts/e2e-collab.mjs"
   }

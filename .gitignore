@@ -5,3 +5,7 @@ dist/
 pkg/
 *.log
 .DS_Store
+# Optional CJK fonts, downloaded by `npm run fetch-fonts` (too big for the repo).
+fonts/noto/NotoSansSC-Regular.otf
+fonts/noto/NotoSansJP-Regular.otf
+fonts/noto/NotoSansKR-Regular.otf

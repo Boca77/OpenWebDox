@@ -14,6 +14,7 @@ use opendox_sync::{Message, SyncError};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::auth::Access;
 use crate::storage::{Storage, StorageError};
 
 #[derive(Debug, Error)]
@@ -24,6 +25,10 @@ pub enum HubError {
     /// The client was dropped (it fell too far behind); it should reconnect.
     #[error("client is no longer connected")]
     Disconnected,
+
+    /// A view-only client sent an edit; it was ignored.
+    #[error("this connection may only view the document")]
+    ReadOnly,
 
     #[error(transparent)]
     Sync(#[from] SyncError),
@@ -67,6 +72,7 @@ pub struct Hub {
 /// One client's membership in a room. Pass it back to [`Hub::receive`] and [`Hub::leave`].
 pub struct Session {
     pub client: u32,
+    pub access: Access,
     doc: String,
     room: Arc<Mutex<Room>>,
 }
@@ -91,9 +97,19 @@ impl Hub {
         }
     }
 
-    /// Joins document `doc`, loading it if no one has it open. Returns the session and the
-    /// queue of messages to send to the client.
+    /// Joins document `doc` with edit access, loading it if no one has it open. Returns the
+    /// session and the queue of messages to send to the client.
     pub fn join(&self, doc: &str) -> Result<(Session, mpsc::Receiver<Vec<u8>>), HubError> {
+        self.join_with(doc, Access::Edit)
+    }
+
+    /// [`Hub::join`] with the access the client was given. A view-only client is told so first
+    /// ([`Message::ReadOnly`]), and its edits are refused.
+    pub fn join_with(
+        &self,
+        doc: &str,
+        access: Access,
+    ) -> Result<(Session, mpsc::Receiver<Vec<u8>>), HubError> {
         if !valid_doc_id(doc) {
             return Err(HubError::BadDocId);
         }
@@ -108,10 +124,17 @@ impl Hub {
         };
         let client = self.next_client.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(self.config.outbox);
-        lock(&room).clients.insert(client, tx);
+        {
+            let mut r = lock(&room);
+            r.clients.insert(client, tx);
+            if access == Access::View {
+                r.send(client, Message::ReadOnly.encode());
+            }
+        }
         Ok((
             Session {
                 client,
+                access,
                 doc: doc.to_owned(),
                 room,
             },
@@ -147,6 +170,9 @@ impl Hub {
                     room.send(s.client, m.encode());
                 }
             }
+            Message::Update { .. } if s.access == Access::View => {
+                return Err(HubError::ReadOnly);
+            }
             Message::Update { updates } => {
                 let before = room.doc.version();
                 room.doc.import(&updates)?;
@@ -177,7 +203,7 @@ impl Hub {
                     },
                 );
             }
-            Message::SyncReply { .. } | Message::Leave { .. } => {
+            Message::SyncReply { .. } | Message::Leave { .. } | Message::ReadOnly => {
                 return Err(SyncError::Malformed("clients don't send this message".into()).into())
             }
         }

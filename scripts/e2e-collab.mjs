@@ -66,7 +66,13 @@ async function openTab(name) {
     /** Puts the caret at `pos` with a real click. */
     async clickAt(pos) {
       const [x, y] = await ev(`(() => { const {editor, view} = window.opendox; const r = editor.caret_rect(${pos}, false);
-        const page = view.renderer.pages[r[0]].getBoundingClientRect(); const k = view.renderer.cssPerPt;
+        const k = view.renderer.cssPerPt;
+    // Scroll only if the point is hidden (under the sticky header or below the window), so
+    // positions read earlier stay valid.
+    const top = document.querySelector('header').getBoundingClientRect().bottom;
+    let p = view.renderer.pages[r[0]].getBoundingClientRect(); const cy = p.top + (r[2] + r[3]) / 2 * k;
+    if (cy < top + 8 || cy > innerHeight - 8) { scrollBy(0, cy - (top + innerHeight) / 2); p = view.renderer.pages[r[0]].getBoundingClientRect(); }
+    const page = p;
         return [page.left + r[1] * k, page.top + (r[2] + r[3]) / 2 * k]; })()`);
       await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
       await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
@@ -176,10 +182,42 @@ await a.ev("(() => { const v = window.opendox.view; v.anchor = 0; v.focus = 5; v
 check(
   "bold and centring reach B",
   await until(async () => {
-    const fonts = await b.ev("(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set(); for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s]; })()");
+    const fonts = await b.ev("(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set(); for (let i = 0; i < g.length; i += 7) s.add(g[i]); return [...s]; })()");
     // Font 2 is Noto Sans Bold in the demo's registration order.
     return fonts.includes(2) && (await b.ev("window.opendox.editor.paragraph_format(0)[0]")) === 1;
   }),
+);
+
+// 7c. Lists sync: A numbers its first paragraph and nests it; B sees the same list item.
+await a.ev("(() => { const v = window.opendox.view; v.anchor = 0; v.focus = 0; v.setList('number'); v.indent(true); })()");
+check(
+  "numbered, nested item reaches B",
+  await until(async () => {
+    const f = await b.ev("Array.from(window.opendox.editor.paragraph_format(0)).slice(7, 9)");
+    return JSON.stringify(f) === "[2,1]";
+  }),
+);
+
+// 7d. Headers sync: A adds one and types in it; B lays it out on its pages too.
+await a.ev(`(() => { const v = window.opendox.view; v.setMargin("header", true); v.insertText("Shared header"); })()`);
+check(
+  "header reaches B",
+  await until(async () =>
+    b.ev(`(() => { const e = window.opendox.editor; if (!e.has_header()) return false;
+      const s = e.region_start(1); const [a, z] = e.region_bounds(s); return e.slice(a, z) === "Shared header"; })()`),
+  ),
+);
+
+// 7e. Comments sync: A comments, B replies, A sees the reply.
+const commentId = await a.ev(`(() => { const v = window.opendox.view; v.setSelection(0, 4); return v.addComment("Ada", "Shared note"); })()`);
+check(
+  "comment reaches B",
+  await until(async () => (await b.ev("window.opendox.view.comments().map((c) => c.text).join()")) === "Shared note"),
+);
+await b.ev(`window.opendox.view.replyToComment(${JSON.stringify(commentId)}, "Grace", "Seen")`);
+check(
+  "reply reaches A",
+  await until(async () => (await a.ev("JSON.stringify(window.opendox.view.comments()[0]?.replies.map((r) => r.text))")) === '["Seen"]'),
 );
 
 // 8. Reloading B restores the document from the server.
@@ -188,6 +226,38 @@ await b.send("Page.reload");
 await sleep(300);
 check("reloaded tab reconnects", await b.waitReady());
 check("reloaded tab has the whole document", await until(async () => (await b.text()) === expected), JSON.stringify(await b.text()));
+
+// 9. Edits made offline survive closing the tab: B opens the document with no server
+// reachable, types, waits for the copy on this device, then reopens online; A gets the text.
+const offlineUrl = `http://127.0.0.1:5174/demo/?doc=${DOC}&name=Bo&server=ws://127.0.0.1:9`;
+await b.send("Page.navigate", { url: offlineUrl });
+check("offline tab loads", await until(async () => (await b.ev("document.body?.dataset.ready === 'true'").catch(() => false)) === true));
+check("…and is offline", (await b.status()).startsWith("Offline") || (await b.status()).startsWith("Connecting"), await b.status());
+check("…with the document from this device", (await b.text()) === expected, JSON.stringify(await b.text()));
+await b.clickAt(await b.ev("window.opendox.editor.len()"));
+await b.type(" (typed offline)");
+check(
+  "the offline edit is saved on this device",
+  await until(async () => (await b.ev("document.getElementById('s-saved').textContent")) === "Saved on this device"),
+);
+await b.send("Page.navigate", { url: `http://127.0.0.1:5174/demo/?doc=${DOC}&name=Bo` });
+await sleep(300);
+check("reopened online", await b.waitReady());
+check(
+  "the offline edit reaches A",
+  await until(async () => (await a.text()).endsWith(" (typed offline)")),
+  JSON.stringify((await a.text()).slice(-30)),
+);
+
+// 10. A read-only editor ignores typing and deleting but still selects.
+await b.ev("window.opendox.view.setReadOnly(true)");
+const frozen = await b.text();
+await b.clickAt(3);
+await b.type("nope");
+await b.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+check("read-only ignores typing and Backspace", (await b.text()) === frozen);
+check("…but the caret still moves", JSON.stringify(await b.sel()) === "[3,3]", JSON.stringify(await b.sel()));
+await b.ev("window.opendox.view.setReadOnly(false)");
 
 if (OUT) {
   await a.clickAt(5);

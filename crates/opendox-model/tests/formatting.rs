@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // test helpers, not only #[test] fns
 
 use opendox_model::{
-    Align, Document, FormatChange, History, Outline, ParagraphChange, ParagraphFormat,
+    Align, Document, FormatChange, History, Outline, ParagraphChange, ParagraphFormat, Script,
+    StyleName,
 };
 use proptest::prelude::*;
 
@@ -407,7 +408,15 @@ fn change(i: usize) -> FormatChange {
         2 => FormatChange::Italic(true),
         3 => FormatChange::Size(Some(18.0)),
         4 => FormatChange::Size(None),
-        _ => FormatChange::Font(Some("Noto Serif".into())),
+        5 => FormatChange::Font(Some("Noto Serif".into())),
+        6 => FormatChange::Underline(true),
+        7 => FormatChange::Strike(true),
+        8 => FormatChange::Color(Some("#cc0000".into())),
+        9 => FormatChange::Highlight(Some("#ffff00".into())),
+        10 => FormatChange::Script(Script::Super),
+        11 => FormatChange::Link(Some("https://example.org/a".into())),
+        12 => FormatChange::Link(Some("https://example.org/b".into())),
+        _ => FormatChange::Link(None),
     }
 }
 
@@ -416,7 +425,10 @@ fn paragraph_change(i: usize) -> ParagraphChange {
         0 => ParagraphChange::Align(Align::Center),
         1 => ParagraphChange::Align(Align::Left),
         2 => ParagraphChange::LineSpacing(1.5),
-        _ => ParagraphChange::SpaceBefore(6.0),
+        3 => ParagraphChange::SpaceBefore(6.0),
+        4 => ParagraphChange::Style(StyleName::Heading(1)),
+        5 => ParagraphChange::Style(StyleName::Title),
+        _ => ParagraphChange::Style(StyleName::Normal),
     }
 }
 
@@ -426,9 +438,9 @@ fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(replica, at, text)| Op::Insert { replica, at, text }),
         1 => (0..REPLICAS, 0.0..=1.0, 0.0..=1.0)
             .prop_map(|(replica, from, to)| Op::Delete { replica, from, to }),
-        2 => (0..REPLICAS, 0.0..=1.0, 0.0..=1.0, 0..6usize)
+        2 => (0..REPLICAS, 0.0..=1.0, 0.0..=1.0, 0..14usize)
             .prop_map(|(replica, from, to, change)| Op::Format { replica, from, to, change }),
-        1 => (0..REPLICAS, 0.0..=1.0, 0..4usize)
+        1 => (0..REPLICAS, 0.0..=1.0, 0..7usize)
             .prop_map(|(replica, at, change)| Op::Paragraph { replica, at, change }),
         2 => (0.0..1.0, 0..REPLICAS).prop_map(|(update, to)| Op::Deliver { update, to }),
     ]

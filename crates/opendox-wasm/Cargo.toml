@@ -15,6 +15,8 @@ opendox-layout.workspace = true
 opendox-sync.workspace = true
 opendox-export.workspace = true
 wasm-bindgen.workspace = true
+# Already compiled in through Loro; comments go to the editor as JSON.
+serde_json.workspace = true
 
 [lints]
 workspace = true

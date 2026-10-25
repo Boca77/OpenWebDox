@@ -11,6 +11,15 @@
 //!
 //! Positions just before and just after a placeholder belong to no paragraph; [`Outline::snap`]
 //! moves such positions to the nearest real caret position.
+//!
+//! # Regions
+//!
+//! The page header and footer, when the document has them, come after the body in the same
+//! position space: the header's first paragraph starts one past the body's last position
+//! ([`Outline::len`]), the footer one past the header's end. Footnotes follow, in number
+//! order, each one past the end of what comes before it. Moving and deleting never cross from
+//! one region (body, header, footer, footnotes) into another, and deleting never crosses from
+//! one footnote into another.
 
 use std::ops::Range;
 
@@ -22,6 +31,33 @@ use crate::table::{CellRef, TABLE_PLACEHOLDER};
 pub enum TextRef {
     Body,
     Cell(CellRef),
+    /// The page header, repeated on every page.
+    Header,
+    /// The page footer, repeated on every page.
+    Footer,
+    /// A footnote's text, by note id.
+    Footnote(String),
+}
+
+/// The part of the document a position is in. Table cells belong to the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Region {
+    Body,
+    Header,
+    Footer,
+    /// Any footnote's text.
+    Footnote,
+}
+
+impl TextRef {
+    pub fn region(&self) -> Region {
+        match self {
+            TextRef::Body | TextRef::Cell(_) => Region::Body,
+            TextRef::Header => Region::Header,
+            TextRef::Footer => Region::Footer,
+            TextRef::Footnote(_) => Region::Footnote,
+        }
+    }
 }
 
 /// A position inside one text container.
@@ -83,12 +119,29 @@ pub(crate) struct TableInput {
     pub(crate) cells: Vec<Vec<String>>,
 }
 
+/// A footnote in the outline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FootnoteSlots {
+    pub id: String,
+    /// Flat position of its reference (the placeholder) in body or cell text.
+    pub reference: usize,
+    /// Its paragraphs, as indices into [`Outline::slots`].
+    pub slots: Range<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outline {
+    /// The body's blocks (header and footer paragraphs aren't blocks).
     pub blocks: Vec<Block>,
     pub slots: Vec<Slot>,
-    /// Largest flat position.
+    /// Largest flat position in the body.
     pub len: usize,
+    /// Slots of the header's paragraphs (empty without a header).
+    pub header: Range<usize>,
+    /// Slots of the footer's paragraphs (empty without a footer).
+    pub footer: Range<usize>,
+    /// The footnotes in number order (note 1 first): in the order of their references.
+    pub footnotes: Vec<FootnoteSlots>,
 }
 
 impl Outline {
@@ -103,6 +156,9 @@ impl Outline {
             blocks: Vec::new(),
             slots: Vec::new(),
             len: 0,
+            header: 0..0,
+            footer: 0..0,
+            footnotes: Vec::new(),
         };
         // Extra flat positions contributed by tables seen so far.
         let mut shift = 0usize;
@@ -175,7 +231,85 @@ impl Outline {
         }
         emit_paragraph(&mut out, seg_start, n, shift);
         out.len = n + shift;
+        let end = out.slots.len();
+        out.header = end..end;
+        out.footer = end..end;
         out
+    }
+
+    /// Adds a header or footer's text after everything so far, one slot per paragraph, and
+    /// returns their slot range.
+    pub(crate) fn add_region(&mut self, container: TextRef, text: &str) -> Range<usize> {
+        let first = self.slots.len();
+        let mut flat = self.slots.last().map_or(0, Slot::flat_end) + 1;
+        let mut offset = 0;
+        for para in text.split('\n') {
+            let n = para.chars().count();
+            self.slots.push(Slot {
+                container: container.clone(),
+                offset,
+                text: para.to_owned(),
+                flat,
+            });
+            offset += n + 1;
+            flat += n + 1;
+        }
+        first..self.slots.len()
+    }
+
+    /// The region holding flat position `pos`.
+    pub fn region(&self, pos: usize) -> Region {
+        if pos <= self.len {
+            return Region::Body;
+        }
+        self.slot_at(self.snap(pos))
+            .map_or(Region::Body, |(i, _)| self.slots[i].container.region())
+    }
+
+    /// The first and last flat positions of `pos`'s region; in a footnote, of that note.
+    pub fn region_bounds(&self, pos: usize) -> (usize, usize) {
+        let range = match self.region(pos) {
+            Region::Body => return (0, self.len),
+            Region::Header => &self.header,
+            Region::Footer => &self.footer,
+            Region::Footnote => match self.footnote_at(pos) {
+                Some(n) => &n.slots,
+                None => return (pos, pos),
+            },
+        };
+        match (self.slots.get(range.start), range.end.checked_sub(1)) {
+            (Some(first), Some(last)) => (first.flat, self.slots[last].flat_end()),
+            _ => (pos, pos),
+        }
+    }
+
+    /// Flat position of char `offset` of a header, footer or footnote's text.
+    pub fn flat_in_region(&self, container: &TextRef, offset: usize) -> Option<usize> {
+        let range = match container {
+            TextRef::Header => self.header.clone(),
+            TextRef::Footer => self.footer.clone(),
+            TextRef::Footnote(id) => self.footnote(id)?.slots.clone(),
+            _ => return None,
+        };
+        let slot = self.slots[range]
+            .iter()
+            .rev()
+            .find(|s| s.offset <= offset)?;
+        Some(slot.flat + (offset - slot.offset).min(slot.text.chars().count()))
+    }
+
+    /// The footnote with this id, if its reference is in the document.
+    pub fn footnote(&self, id: &str) -> Option<&FootnoteSlots> {
+        self.footnotes.iter().find(|n| n.id == id)
+    }
+
+    /// The footnote whose text holds flat position `pos`.
+    pub fn footnote_at(&self, pos: usize) -> Option<&FootnoteSlots> {
+        if pos <= self.len {
+            return None;
+        }
+        let (i, _) = self.slot_at(self.snap(pos))?;
+        self.footnotes.iter().find(|n| n.slots.contains(&i))
     }
 
     pub fn tables(&self) -> impl Iterator<Item = &TableBlock> {
@@ -197,6 +331,15 @@ impl Outline {
 
     /// Where flat position `pos` is in the document's containers.
     pub fn locate(&self, pos: usize) -> Location {
+        if pos > self.len {
+            if let Some((i, off)) = self.slot_at(self.snap(pos)) {
+                let s = &self.slots[i];
+                return Location {
+                    container: s.container.clone(),
+                    offset: s.offset + off,
+                };
+            }
+        }
         let mut shift = 0;
         for t in self.tables() {
             if pos < t.flat_first {
@@ -278,7 +421,11 @@ impl Outline {
         let b = grapheme::boundaries(&s.text);
         match b.iter().find(|&&x| x > off) {
             Some(&next) => s.flat + next,
-            None => self.slots.get(i + 1).map_or(pos, |n| n.flat),
+            None => self
+                .slots
+                .get(i + 1)
+                .filter(|n| n.container.region() == s.container.region())
+                .map_or(pos, |n| n.flat),
         }
     }
 
@@ -291,8 +438,64 @@ impl Outline {
         let b = grapheme::boundaries(&s.text);
         match b.iter().rev().find(|&&x| x < off) {
             Some(&prev) => s.flat + prev,
-            None => i.checked_sub(1).map_or(pos, |p| self.slots[p].flat_end()),
+            None => i
+                .checked_sub(1)
+                .map(|p| &self.slots[p])
+                .filter(|p| p.container.region() == s.container.region())
+                .map_or(pos, Slot::flat_end),
         }
+    }
+
+    /// Ctrl+Right: the start of the next word in the paragraph, else the paragraph's end; from
+    /// a paragraph's end, the start of the next one (in the same region).
+    pub fn word_right(&self, pos: usize) -> usize {
+        let Some((i, off)) = self.slot_at(pos) else {
+            return self.snap(pos);
+        };
+        let s = &self.slots[i];
+        let n = s.text.chars().count();
+        if off >= n {
+            return self.move_right(pos);
+        }
+        let next_word = grapheme::word_segments(&s.text)
+            .into_iter()
+            .find(|(r, word)| *word && r.start > off)
+            .map_or(n, |(r, _)| r.start);
+        s.flat + next_word
+    }
+
+    /// Ctrl+Left: the start of the word the caret is in or after; from a paragraph's start, the
+    /// end of the previous one (in the same region).
+    pub fn word_left(&self, pos: usize) -> usize {
+        let Some((i, off)) = self.slot_at(pos) else {
+            return self.snap(pos);
+        };
+        if off == 0 {
+            return self.move_left(pos);
+        }
+        let s = &self.slots[i];
+        let start = grapheme::word_segments(&s.text)
+            .into_iter()
+            .filter(|(r, word)| *word && r.start < off)
+            .map(|(r, _)| r.start)
+            .next_back()
+            .unwrap_or(0);
+        s.flat + start
+    }
+
+    /// The word (or run of spaces or punctuation) at the caret, as flat `start..end`: what a
+    /// double-click selects. At a paragraph's end, the segment before the caret.
+    pub fn word_at(&self, pos: usize) -> Range<usize> {
+        let Some((i, off)) = self.slot_at(pos) else {
+            return pos..pos;
+        };
+        let s = &self.slots[i];
+        let segs = grapheme::word_segments(&s.text);
+        let hit = segs
+            .iter()
+            .find(|(r, _)| r.contains(&off))
+            .or_else(|| segs.iter().rev().find(|(r, _)| r.end == off));
+        hit.map_or(pos..pos, |(r, _)| s.flat + r.start..s.flat + r.end)
     }
 
     /// The previous grapheme boundary within the same paragraph, if any.
@@ -336,7 +539,7 @@ impl Outline {
     pub fn cell_at(&self, pos: usize) -> Option<CellRef> {
         match self.locate(pos).container {
             TextRef::Cell(c) => Some(c),
-            TextRef::Body => None,
+            TextRef::Body | TextRef::Header | TextRef::Footer | TextRef::Footnote(_) => None,
         }
     }
 

@@ -15,6 +15,7 @@ fn layout(text: &str) -> ParagraphLayout {
         font_size: 12.0,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     };
     LayoutEngine::new(fonts).layout_paragraph(text, &style, &[], 1000.0)
 }

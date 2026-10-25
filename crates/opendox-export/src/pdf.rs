@@ -7,11 +7,20 @@
 //! character is drawn with several glyphs or with the font's missing-glyph box (which one
 //! glyph id would share between different characters), the glyphs are wrapped in an
 //! `ActualText` span carrying the real text.
+//!
+//! Text colours, highlights, underlines and strikethroughs are drawn as layout placed them.
+//! Links become link annotations over their text, so they open in PDF readers. Titles and
+//! headings become the PDF's bookmarks (its outline), nested by level.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
-use opendox_layout::{FontId, FontLibrary, Layer, Paginator, PlacedObject};
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use opendox_layout::{
+    DecorationKind, FontId, FontLibrary, GlyphRun, Layer, Paginator, PlacedObject, TextPosition,
+};
+use pdf_writer::types::{
+    ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
+};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::TableProvider;
@@ -34,6 +43,38 @@ pub struct PdfInfo<'a> {
     /// The picture for each object layout placed, indexed by [`PlacedObject::key`]. An object
     /// without one (or whose file can't be decoded) is left out.
     pub images: &'a [Option<ExportImage<'a>>],
+    /// Text that links somewhere: made clickable in the PDF.
+    pub links: &'a [PdfLink<'a>],
+    /// Titles and headings in reading order, for the bookmarks.
+    pub headings: &'a [PdfHeading<'a>],
+}
+
+/// A bookmark: a title or heading paragraph and its level (0 title, 1–6 headings; deeper
+/// levels nest under shallower ones).
+#[derive(Debug, Clone)]
+pub struct PdfHeading<'a> {
+    /// Paragraph index, as layout numbers them.
+    pub paragraph: usize,
+    pub level: u8,
+    pub title: &'a str,
+}
+
+/// A link: some of a paragraph's text and where it goes.
+#[derive(Debug, Clone)]
+pub struct PdfLink<'a> {
+    /// Paragraph index, as layout numbers them.
+    pub paragraph: usize,
+    /// UTF-8 byte range in the paragraph's text.
+    pub bytes: Range<usize>,
+    pub url: &'a str,
+}
+
+/// `0xRRGGBB` (or the ink for `None`) as PDF RGB components.
+fn rgb(color: Option<u32>) -> [f32; 3] {
+    match color {
+        None => INK,
+        Some(c) => [(c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff].map(|v| v as f32 / 255.0),
+    }
 }
 
 /// Writes the pages from `paginator`'s last layout as a PDF.
@@ -71,8 +112,24 @@ pub fn pdf(
         for o in page.objects.iter().filter(|o| o.layer != Layer::Front) {
             draw_picture(&mut c, o, height, &pictures);
         }
-        c.set_fill_rgb(INK[0], INK[1], INK[2]);
-        // The same walk as `Paginator::placed_glyphs`, keeping each run's font and text.
+        let decorations = paginator.placed_decorations(index);
+        let fill = |c: &mut Content, color: Option<u32>, r: &opendox_layout::Rect| {
+            let [red, green, blue] = rgb(color);
+            c.set_fill_rgb(red, green, blue);
+            c.rect(r.x, height - r.y - r.height, r.width, r.height);
+            c.fill_nonzero();
+        };
+        // Highlights behind the text.
+        for d in decorations
+            .iter()
+            .filter(|d| d.kind == DecorationKind::Highlight)
+        {
+            fill(&mut c, d.color, &d.rect);
+        }
+        let mut ink: Option<Option<u32>> = None;
+        // The same walk as `Paginator::placed_glyphs`, keeping each run's font and text, and
+        // where its glyph positions are measured from.
+        let mut runs: Vec<(&GlyphRun, &str, f32, f32)> = Vec::new();
         for f in &page.fragments {
             let Some(para) = paginator.paragraph(f.paragraph) else {
                 continue;
@@ -82,44 +139,78 @@ pub fn pdf(
             };
             let dy = f.top - first.top;
             let text = paragraphs.get(f.paragraph).copied().unwrap_or("");
+            // A list marker first, so it extracts before its item's text; its runs index
+            // into the marker's own text.
+            if let Some(m) = para.marker.as_ref().filter(|_| f.lines.start == 0) {
+                runs.extend(m.runs.iter().map(|r| (r, m.text.as_str(), f.left, dy)));
+            }
             for line in &para.lines[f.lines.clone()] {
-                for run in &line.runs {
-                    let n = used.len();
-                    let font = used
-                        .entry((run.font.0, run.face_index))
-                        .or_insert_with(|| UsedFont::new(n));
-                    c.begin_text();
-                    c.set_font(Name(font.name.as_bytes()), run.font_size);
-                    let pairs: Vec<_> = run.glyphs.iter().zip(&run.glyph_text).collect();
-                    // One group per character (cluster): glyphs sharing their text.
-                    for group in pairs.chunk_by(|a, b| a.1 == b.1) {
-                        let s = text.get(group[0].1.clone()).unwrap_or("");
-                        let spanned = !s.is_empty()
-                            && (group.len() > 1 || group.iter().any(|(g, _)| g.id == 0));
-                        if spanned {
-                            c.begin_marked_content_with_properties(Name(b"Span"))
-                                .properties()
-                                .actual_text(TextStr(s));
-                        }
-                        for (g, _) in group {
-                            let gid = font.glyph(g.id, (!spanned).then_some(s));
-                            c.set_text_matrix([
-                                1.0,
-                                0.0,
-                                0.0,
-                                1.0,
-                                f.left + g.x,
-                                height - (dy + g.y),
-                            ]);
-                            c.show(Str(&gid.to_be_bytes()));
-                        }
-                        if spanned {
-                            c.end_marked_content();
-                        }
-                    }
-                    c.end_text();
+                // Header and footer fields where they sit in the line, so text extracts in
+                // reading order; their runs are in page coordinates and index their own text.
+                let mut items: Vec<(usize, &GlyphRun, &str, f32, f32)> = line
+                    .runs
+                    .iter()
+                    .map(|r| (r.byte_range.start, r, text, f.left, dy))
+                    .collect();
+                for l in page
+                    .labels
+                    .iter()
+                    .filter(|l| l.paragraph == f.paragraph && line.byte_range.contains(&l.byte))
+                {
+                    items.extend(
+                        l.runs
+                            .iter()
+                            .map(|r| (l.byte, r, l.text.as_str(), 0.0, 0.0)),
+                    );
+                }
+                // Only lines holding a field are reordered: runs come in visual order, which
+                // right-to-left text keeps.
+                if items.len() > line.runs.len() {
+                    items.sort_by_key(|i| i.0);
+                }
+                runs.extend(items.into_iter().map(|(_, r, t, x, y)| (r, t, x, y)));
+            }
+        }
+        for (run, text, dx, dy) in runs {
+            let n = used.len();
+            let font = used
+                .entry((run.font.0, run.face_index))
+                .or_insert_with(|| UsedFont::new(n));
+            c.begin_text();
+            if ink != Some(run.color) {
+                let [red, green, blue] = rgb(run.color);
+                c.set_fill_rgb(red, green, blue);
+                ink = Some(run.color);
+            }
+            c.set_font(Name(font.name.as_bytes()), run.font_size);
+            let pairs: Vec<_> = run.glyphs.iter().zip(&run.glyph_text).collect();
+            // One group per character (cluster): glyphs sharing their text.
+            for group in pairs.chunk_by(|a, b| a.1 == b.1) {
+                let s = text.get(group[0].1.clone()).unwrap_or("");
+                let spanned =
+                    !s.is_empty() && (group.len() > 1 || group.iter().any(|(g, _)| g.id == 0));
+                if spanned {
+                    c.begin_marked_content_with_properties(Name(b"Span"))
+                        .properties()
+                        .actual_text(TextStr(s));
+                }
+                for (g, _) in group {
+                    let gid = font.glyph(g.id, (!spanned).then_some(s));
+                    c.set_text_matrix([1.0, 0.0, 0.0, 1.0, dx + g.x, height - (dy + g.y)]);
+                    c.show(Str(&gid.to_be_bytes()));
+                }
+                if spanned {
+                    c.end_marked_content();
                 }
             }
+            c.end_text();
+        }
+        // Underlines and strikethroughs over it.
+        for d in decorations
+            .iter()
+            .filter(|d| d.kind != DecorationKind::Highlight)
+        {
+            fill(&mut c, d.color, &d.rect);
         }
         let rules = &page.rules;
         if !rules.is_empty() {
@@ -134,7 +225,6 @@ pub fn pdf(
         for o in page.objects.iter().filter(|o| o.layer == Layer::Front) {
             draw_picture(&mut c, o, height, &pictures);
         }
-        let _ = index;
         contents.push(c.finish().into_vec());
     }
 
@@ -149,6 +239,22 @@ pub fn pdf(
     let tree = alloc();
     let info_id = alloc();
     let page_ids: Vec<(Ref, Ref)> = contents.iter().map(|_| (alloc(), alloc())).collect();
+    // Each link's areas, per page: one per line it covers.
+    let mut annotations: Vec<Vec<(Ref, Rect, &str)>> = vec![Vec::new(); contents.len()];
+    for link in info.links {
+        let at = |byte: usize| TextPosition {
+            paragraph: link.paragraph,
+            byte,
+            upstream: false,
+        };
+        let rects = paginator.selection_rects(at(link.bytes.start), at(link.bytes.end));
+        for r in rects {
+            if let Some(list) = annotations.get_mut(r.page) {
+                let area = Rect::new(r.x, height - r.y - r.height, r.x + r.width, height - r.y);
+                list.push((alloc(), area, link.url));
+            }
+        }
+    }
     let font_ids: Vec<Ref> = used.values().map(|_| alloc()).collect();
     // Per picture: the image, its alpha mask if it has one, a graphics state if see-through.
     let picture_ids: BTreeMap<usize, (Ref, Ref, Ref)> = pictures
@@ -156,7 +262,34 @@ pub fn pdf(
         .map(|k| (*k, (alloc(), alloc(), alloc())))
         .collect();
 
-    pdf.catalog(catalog).pages(tree);
+    // Bookmarks: each heading's parent is the nearest earlier heading of a shallower level.
+    let outline_root = alloc();
+    let mut marks: Vec<Bookmark> = Vec::new();
+    for h in info.headings {
+        let Some(line) = paginator
+            .placed_lines()
+            .iter()
+            .find(|l| l.paragraph == h.paragraph && l.line == 0)
+        else {
+            continue;
+        };
+        let parent = marks.iter().rposition(|m| m.level < h.level);
+        let id = alloc();
+        marks.push(Bookmark {
+            id,
+            level: h.level,
+            title: h.title.trim(),
+            page: line.page,
+            top: height - line.top,
+            parent,
+        });
+    }
+    let mut catalog_writer = pdf.catalog(catalog);
+    catalog_writer.pages(tree);
+    if !marks.is_empty() {
+        catalog_writer.outlines(outline_root);
+    }
+    catalog_writer.finish();
     pdf.pages(tree)
         .kids(page_ids.iter().map(|(p, _)| *p))
         .count(page_ids.len() as i32);
@@ -168,9 +301,13 @@ pub fn pdf(
     doc_info.finish();
 
     let media = Rect::new(0.0, 0.0, geometry.width, height);
-    for ((page_id, content_id), content) in page_ids.iter().zip(&contents) {
+    for (n, ((page_id, content_id), content)) in page_ids.iter().zip(&contents).enumerate() {
         let mut page = pdf.page(*page_id);
         page.parent(tree).media_box(media).contents(*content_id);
+        let links = &annotations[n];
+        if !links.is_empty() {
+            page.annotations(links.iter().map(|(id, _, _)| *id));
+        }
         let mut res = page.resources();
         let mut dict = res.fonts();
         for (font, id) in used.values().zip(&font_ids) {
@@ -195,6 +332,20 @@ pub fn pdf(
         pdf.stream(*content_id, &packed).filter(Filter::FlateDecode);
     }
 
+    if !marks.is_empty() {
+        write_outline(&mut pdf, outline_root, &marks, &page_ids);
+    }
+
+    for (id, area, url) in annotations.iter().flatten() {
+        let mut a = pdf.annotation(*id);
+        a.subtype(AnnotationType::Link)
+            .rect(*area)
+            .border(0.0, 0.0, 0.0, None);
+        a.action()
+            .action_type(ActionType::Uri)
+            .uri(Str(url.as_bytes()));
+    }
+
     for (((font_id, face), font), type0) in used.iter().map(|(k, v)| (*k, v)).zip(&font_ids) {
         let data = fonts
             .data(FontId(font_id))
@@ -213,6 +364,65 @@ pub fn pdf(
     }
 
     Ok(pdf.finish())
+}
+
+/// A bookmark to write: where its heading starts (page, y from the page's bottom) and its
+/// parent bookmark, as an index into the list.
+struct Bookmark<'a> {
+    id: Ref,
+    level: u8,
+    title: &'a str,
+    page: usize,
+    top: f32,
+    parent: Option<usize>,
+}
+
+/// The outline dictionary and its items, every item open.
+fn write_outline(pdf: &mut Pdf, root: Ref, marks: &[Bookmark], pages: &[(Ref, Ref)]) {
+    let children = |parent: Option<usize>| -> Vec<usize> {
+        (0..marks.len())
+            .filter(|&i| marks[i].parent == parent)
+            .collect()
+    };
+    // Items below each one, at any depth (what an open item's /Count holds).
+    let mut below = vec![0i32; marks.len()];
+    for i in (0..marks.len()).rev() {
+        if let Some(p) = marks[i].parent {
+            below[p] += 1 + below[i];
+        }
+    }
+    let top = children(None);
+    let mut o = pdf.outline(root);
+    if let (Some(&first), Some(&last)) = (top.first(), top.last()) {
+        o.first(marks[first].id).last(marks[last].id);
+    }
+    o.count(marks.len() as i32);
+    o.finish();
+    for (i, m) in marks.iter().enumerate() {
+        let siblings = children(m.parent);
+        let at = siblings.iter().position(|&s| s == i).unwrap_or(0);
+        let kids = children(Some(i));
+        let mut item = pdf.outline_item(m.id);
+        item.title(TextStr(if m.title.is_empty() {
+            "Untitled"
+        } else {
+            m.title
+        }));
+        item.parent(m.parent.map_or(root, |p| marks[p].id));
+        if let Some(&prev) = at.checked_sub(1).and_then(|k| siblings.get(k)) {
+            item.prev(marks[prev].id);
+        }
+        if let Some(&next) = siblings.get(at + 1) {
+            item.next(marks[next].id);
+        }
+        if let (Some(&first), Some(&last)) = (kids.first(), kids.last()) {
+            item.first(marks[first].id).last(marks[last].id);
+            item.count(below[i]);
+        }
+        if let Some((page, _)) = pages.get(m.page) {
+            item.dest().page(*page).xyz(0.0, m.top, None);
+        }
+    }
 }
 
 fn picture_name(key: usize) -> String {

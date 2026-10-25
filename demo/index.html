@@ -202,8 +202,193 @@
         border-radius: 6px;
         box-shadow: var(--menu-shadow);
       }
-      #picker[hidden] {
+      #page-setup {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        z-index: 4;
+        display: grid;
+        gap: 12px;
+        width: 300px;
+        padding: 12px 14px;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #page-setup fieldset {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+      #page-setup legend {
+        margin-bottom: 6px;
+        padding: 0;
+        color: var(--text-muted);
+      }
+      #page-setup .margins {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+      #page-setup .margins label {
+        justify-content: space-between;
+      }
+      #page-setup input[type="number"] {
+        width: 72px;
+        min-height: 36px;
+        padding: 0 6px;
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+        color: var(--text);
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+      }
+      #page-setup input:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      #page-setup-error {
+        margin: 0;
+        color: #b3261e;
+      }
+      #margins-panel {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        z-index: 4;
+        display: grid;
+        gap: 10px;
+        width: 260px;
+        padding: 12px 14px;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #margins-panel .hint {
+        margin: 4px 0 0;
+        color: var(--text-muted);
+      }
+      #margins-panel .panel-row {
+        justify-content: flex-start;
+      }
+      #picker[hidden],
+      #margins-panel[hidden],
+      #page-setup[hidden],
+      #spacing-panel[hidden] {
         display: none;
+      }
+      #spacing-panel {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        z-index: 1;
+        display: grid;
+        gap: 8px;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      /* Text colour / highlight: a letter or pen over a bar showing the current colour. */
+      .swatch-tool {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+      }
+      .swatch-tool .bar {
+        width: 18px;
+        height: 4px;
+        border-radius: 1px;
+        box-shadow: inset 0 0 0 1px rgb(40 48 64 / 0.25);
+      }
+      .swatch-tool svg {
+        margin: 0;
+      }
+      #color-panel,
+      #link-panel,
+      #link-bubble {
+        position: absolute;
+        z-index: 4;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-radius: 6px;
+        box-shadow: var(--menu-shadow);
+      }
+      #color-panel[hidden],
+      #link-panel[hidden],
+      #link-bubble[hidden] {
+        display: none;
+      }
+      #link-panel {
+        top: calc(100% + 4px);
+        left: 0;
+        display: grid;
+        gap: 8px;
+        width: 320px;
+      }
+      #link-panel input {
+        flex: 1;
+        min-height: 36px;
+        padding: 0 8px;
+        font: inherit;
+        color: var(--text);
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+      }
+      #link-panel input:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .panel-row {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      #swatches {
+        display: grid;
+        grid-template-columns: repeat(8, 28px);
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+      #swatches button {
+        min-height: 0;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 1px solid rgb(40 48 64 / 0.2);
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      /* The current colour: a ring, so the state isn't carried by hue alone. */
+      #swatches button[aria-pressed="true"] {
+        box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+      }
+      .text-button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      #link-bubble {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        max-width: 420px;
+        padding: 4px 4px 4px 12px;
+      }
+      #link-bubble a {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--accent);
+      }
+      #spacing-panel label {
+        justify-content: space-between;
+        gap: 16px;
+        white-space: nowrap;
       }
       #grid {
         display: grid;
@@ -271,12 +456,180 @@
       #pages {
         display: flex;
         flex-direction: column;
-        align-items: center;
+        /* "safe": a page wider than the window starts at its left edge (scrollable) instead
+           of being centred off-screen. */
+        align-items: safe center;
         gap: 16px;
         padding: 16px;
       }
       .opendox-page {
         box-shadow: var(--page-shadow);
+      }
+      /* Comments: cards positioned beside their text on wide windows. */
+      #comments {
+        position: absolute;
+        top: 0;
+        width: 272px;
+        z-index: 2;
+      }
+      #comments-empty {
+        display: none;
+      }
+      .comment {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-radius: 8px;
+        box-shadow: var(--page-shadow);
+        cursor: pointer;
+        transition: top 160ms cubic-bezier(0.2, 0, 0, 1);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .comment {
+          transition: none;
+        }
+      }
+      /* The open card: ring and shadow, so it doesn't rest on the highlight colour alone. */
+      .comment[aria-current="true"] {
+        box-shadow: var(--menu-shadow);
+        outline: 2px solid var(--accent);
+        cursor: default;
+      }
+      .comment header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0;
+        background: none;
+        border: 0;
+        position: static;
+      }
+      .comment .who {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+      .comment time {
+        display: block;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+      .comment p {
+        margin: 6px 0 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .comment .reply {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--hairline);
+      }
+      .comment textarea {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 44px;
+        margin-top: 8px;
+        padding: 8px;
+        font: inherit;
+        color: var(--text);
+        border: 1px solid var(--hairline);
+        border-radius: 4px;
+        resize: vertical;
+      }
+      .comment textarea:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .comment .panel-row {
+        margin-top: 8px;
+      }
+      .comment .text-button {
+        min-height: 44px;
+      }
+      .comment .tool.icon {
+        min-height: 44px;
+      }
+      /* Narrow windows: no room beside the page, so the cards stack in a drawer. */
+      @media (max-width: 1319px) {
+        #comments {
+          position: fixed;
+          top: auto;
+          bottom: 16px;
+          right: 16px;
+          left: auto !important;
+          max-height: 50vh;
+          overflow-y: auto;
+          display: grid;
+          gap: 8px;
+        }
+        #comments:empty,
+        #comments:not(:has(.comment)) {
+          display: none;
+        }
+        .comment {
+          position: static;
+        }
+      }
+      /* Document outline: left of the pages, below the header, only where it fits. */
+      #outline {
+        display: none;
+      }
+      @media (min-width: 1320px) {
+        #outline {
+          position: fixed;
+          top: calc(var(--header-height, 128px) + 16px);
+          left: 16px;
+          bottom: 16px;
+          display: block;
+          width: 220px;
+          overflow-y: auto;
+        }
+      }
+      #outline h2 {
+        margin: 0 0 8px;
+        padding-left: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      #outline p {
+        margin: 0;
+        padding-left: 8px;
+        color: var(--text-muted);
+      }
+      #outline ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      #outline button {
+        display: block;
+        width: 100%;
+        min-height: 32px;
+        padding: 4px 8px;
+        overflow: hidden;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        background: transparent;
+        border: 0;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      #outline button:hover {
+        background: var(--surface);
+      }
+      #outline button[aria-current="true"] {
+        color: var(--accent);
+        font-weight: 600;
       }
       /* Images: the bar under a selected image, its wrap menu, and the options panel. */
       #image-bar {
@@ -590,6 +943,7 @@
         <dl class="stats">
           <div><dt>Doc</dt><dd id="s-doc">–</dd></div>
           <div><dt>Sync</dt><dd id="s-sync" aria-live="polite">–</dd></div>
+          <div><dt>Copy</dt><dd id="s-saved">–</dd></div>
         </dl>
         <ul id="people" aria-label="People on this document"></ul>
       </div>
@@ -604,6 +958,50 @@
           </div>
         </div>
         <button id="insert-image" class="tool">Insert image</button>
+        <div class="picker-wrap">
+          <button id="margins-trigger" class="tool" aria-haspopup="dialog" aria-expanded="false" aria-controls="margins-panel">Header &amp; footer</button>
+          <div id="margins-panel" role="dialog" aria-label="Header and footer" hidden>
+            <label><input id="has-header" type="checkbox" /> Header on every page</label>
+            <label><input id="has-footer" type="checkbox" /> Footer on every page</label>
+            <button id="add-page-numbers" class="text-button" type="button">Add page numbers</button>
+            <p class="hint" id="field-hint">Put the cursor in the header or footer to insert:</p>
+            <div class="panel-row">
+              <button id="insert-page-number" class="text-button" type="button">Page number</button>
+              <button id="insert-page-count" class="text-button" type="button">Page count</button>
+            </div>
+          </div>
+        </div>
+        <div class="picker-wrap">
+          <button id="page-setup-trigger" class="tool" aria-haspopup="dialog" aria-expanded="false" aria-controls="page-setup">Page setup</button>
+          <form id="page-setup" role="dialog" aria-label="Page setup" hidden>
+            <label>Paper size
+              <select id="paper">
+                <option value="612x792">Letter (8.5 × 11 in)</option>
+                <option value="612x1008">Legal (8.5 × 14 in)</option>
+                <option value="792x1224">Tabloid (11 × 17 in)</option>
+                <option value="595.28x841.89">A4 (21 × 29.7 cm)</option>
+                <option value="419.53x595.28">A5 (14.8 × 21 cm)</option>
+              </select>
+            </label>
+            <fieldset>
+              <legend>Orientation</legend>
+              <label><input type="radio" name="orientation" value="portrait" checked /> Portrait</label>
+              <label><input type="radio" name="orientation" value="landscape" /> Landscape</label>
+            </fieldset>
+            <fieldset class="margins">
+              <legend>Margins (inches)</legend>
+              <label>Top <input id="margin-top" type="number" min="0" step="0.05" /></label>
+              <label>Bottom <input id="margin-bottom" type="number" min="0" step="0.05" /></label>
+              <label>Left <input id="margin-left" type="number" min="0" step="0.05" /></label>
+              <label>Right <input id="margin-right" type="number" min="0" step="0.05" /></label>
+            </fieldset>
+            <p id="page-setup-error" role="alert" hidden></p>
+            <div class="panel-row">
+              <button id="page-setup-cancel" class="text-button" type="button">Cancel</button>
+              <button class="text-button primary" type="submit">OK</button>
+            </div>
+          </form>
+        </div>
         <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" hidden />
         <button id="export-pdf" class="tool">Download PDF</button>
         <button id="export-docx" class="tool">Download .docx</button>
@@ -622,6 +1020,20 @@
         <button id="redo" class="tool" title="Redo (Ctrl+Y)">Redo</button>
         <span class="sep" aria-hidden="true"></span>
         <label>
+          <span class="visually-hidden">Paragraph style</span>
+          <select id="para-style" title="Paragraph style (Ctrl+Alt+0–6)">
+            <option value="normal">Normal text</option>
+            <option value="title">Title</option>
+            <option value="subtitle">Subtitle</option>
+            <option value="h1">Heading 1</option>
+            <option value="h2">Heading 2</option>
+            <option value="h3">Heading 3</option>
+            <option value="h4">Heading 4</option>
+            <option value="h5">Heading 5</option>
+            <option value="h6">Heading 6</option>
+          </select>
+        </label>
+        <label>
           <span class="visually-hidden">Font</span>
           <select id="font">
             <option value="">Noto Sans</option>
@@ -638,6 +1050,42 @@
         </label>
         <button id="bold" class="tool icon" aria-pressed="false" aria-label="Bold" title="Bold (Ctrl+B)"><b>B</b></button>
         <button id="italic" class="tool icon" aria-pressed="false" aria-label="Italic" title="Italic (Ctrl+I)"><i>I</i></button>
+        <button id="underline" class="tool icon" aria-pressed="false" aria-label="Underline" title="Underline (Ctrl+U)"><u>U</u></button>
+        <button id="strike" class="tool icon" aria-pressed="false" aria-label="Strikethrough" title="Strikethrough (Alt+Shift+5)"><s>S</s></button>
+        <div class="picker-wrap">
+          <!-- The bar under the letter shows the colour; the label names it for screen readers. -->
+          <button id="color-trigger" class="tool icon swatch-tool" data-target="color" aria-haspopup="dialog" aria-expanded="false" aria-controls="color-panel" aria-label="Text colour" title="Text colour">
+            <span aria-hidden="true">A</span><span class="bar" id="color-bar"></span>
+          </button>
+        </div>
+        <div class="picker-wrap">
+          <button id="highlight-trigger" class="tool icon swatch-tool" data-target="highlight" aria-haspopup="dialog" aria-expanded="false" aria-controls="color-panel" aria-label="Highlight colour" title="Highlight colour">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 13.5 12.5 6l2.5 2.5L7.5 16H5zM11 7.5l2.5 2.5" /></svg>
+            <span class="bar" id="highlight-bar"></span>
+          </button>
+        </div>
+        <div id="color-panel" role="dialog" aria-label="Colour" hidden>
+          <div id="swatches" role="group" aria-label="Colours"></div>
+          <div class="panel-row">
+            <button id="color-none" class="text-button" type="button">None</button>
+            <label class="text-button">Custom<input id="color-custom" type="color" class="visually-hidden" /></label>
+          </div>
+        </div>
+        <button id="comment-trigger" class="tool icon" aria-label="Add comment" title="Add comment (Ctrl+Alt+M)">
+          <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M4 4h12v9H9l-4 3v-3H4zM10 6.5v4M8 8.5h4" /></svg>
+        </button>
+        <div class="picker-wrap">
+          <button id="link-trigger" class="tool icon" aria-haspopup="dialog" aria-expanded="false" aria-controls="link-panel" aria-label="Insert link" title="Insert link (Ctrl+K)">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M8.5 11.5a3 3 0 0 0 4.2 0l3-3a3 3 0 0 0-4.2-4.2l-1 1M11.5 8.5a3 3 0 0 0-4.2 0l-3 3a3 3 0 0 0 4.2 4.2l1-1" /></svg>
+          </button>
+          <form id="link-panel" role="dialog" aria-label="Link" hidden>
+            <label>Link <input id="link-url" type="text" inputmode="url" placeholder="Paste or type a link" autocomplete="off" spellcheck="false" /></label>
+            <div class="panel-row">
+              <button id="link-remove" class="text-button" type="button">Remove</button>
+              <button id="link-apply" class="text-button primary" type="submit">Apply</button>
+            </div>
+          </form>
+        </div>
         <span class="sep" aria-hidden="true"></span>
         <div class="group" role="group" aria-label="Alignment">
           <button class="tool icon" data-align="left" aria-pressed="false" aria-label="Align left" title="Align left (Ctrl+Shift+L)">
@@ -654,32 +1102,74 @@
           </button>
         </div>
         <span class="sep" aria-hidden="true"></span>
-        <label>
-          Line
-          <select id="line-spacing">
-            <option value="1">Single</option>
-            <option value="1.15">1.15</option>
-            <option value="1.5">1.5</option>
-            <option value="2">Double</option>
-          </select>
-        </label>
-        <label>
-          Before
-          <select id="space-before">
-            <option value="0">0 pt</option><option value="6">6 pt</option>
-            <option value="12">12 pt</option><option value="24">24 pt</option>
-          </select>
-        </label>
-        <label>
-          After
-          <select id="space-after">
-            <option value="0">0 pt</option><option value="6">6 pt</option>
-            <option value="12">12 pt</option><option value="24">24 pt</option>
-          </select>
-        </label>
+        <div class="group" role="group" aria-label="Lists">
+          <button class="tool icon" data-list="bullet" aria-pressed="false" aria-label="Bulleted list" title="Bulleted list (Ctrl+Shift+8)">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M8 5h9M8 10h9M8 15h9" /><circle cx="4" cy="5" r="1.3" class="fill" /><circle cx="4" cy="10" r="1.3" class="fill" /><circle cx="4" cy="15" r="1.3" class="fill" /></svg>
+          </button>
+          <button class="tool icon" data-list="number" aria-pressed="false" aria-label="Numbered list" title="Numbered list (Ctrl+Shift+7)">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M8 5h9M8 10h9M8 15h9M3.2 3.6 4.4 3v4M3 12.2c.3-.8 2.2-.9 2.1.3-.1.7-2 1.4-2.1 2.5h2.2" /></svg>
+          </button>
+          <button class="tool icon" data-list="check" aria-pressed="false" aria-label="Checklist" title="Checklist (Ctrl+Shift+9)">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M9 6h8M9 14h8M2.5 3.5h4v4h-4zM2.5 11.5h4v4h-4zM3.3 13.4l1 1 1.6-1.9" /></svg>
+          </button>
+          <button id="outdent" class="tool icon" aria-label="Decrease indent" title="Decrease indent (Ctrl+[)">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M3 4h14M9 8h8M9 12h8M3 16h14M6 7.5 3.5 10 6 12.5" /></svg>
+          </button>
+          <button id="indent" class="tool icon" aria-label="Increase indent" title="Increase indent (Ctrl+])">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M3 4h14M9 8h8M9 12h8M3 16h14M3.5 7.5 6 10l-2.5 2.5" /></svg>
+          </button>
+        </div>
+        <span class="sep" aria-hidden="true"></span>
+        <!-- One button for all spacing, as in Google Docs, so the bar fits one row. -->
+        <div class="picker-wrap">
+          <button id="spacing-trigger" class="tool icon" aria-haspopup="dialog" aria-expanded="false" aria-controls="spacing-panel" aria-label="Line and paragraph spacing" title="Line and paragraph spacing">
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M9 4h8M9 8h8M9 12h8M9 16h8M4.5 3.5v13M2.5 5.5l2-2 2 2M2.5 14.5l2 2 2-2" /></svg>
+          </button>
+          <div id="spacing-panel" role="dialog" aria-label="Line and paragraph spacing" hidden>
+            <label>
+              Line spacing
+              <select id="line-spacing">
+                <option value="1">Single</option>
+                <option value="1.15">1.15</option>
+                <option value="1.5">1.5</option>
+                <option value="2">Double</option>
+              </select>
+            </label>
+            <label>
+              Space before
+              <select id="space-before">
+                <option value="0">0 pt</option><option value="6">6 pt</option>
+                <option value="12">12 pt</option><option value="24">24 pt</option>
+              </select>
+            </label>
+            <label>
+              Space after
+              <select id="space-after">
+                <option value="0">0 pt</option><option value="6">6 pt</option>
+                <option value="12">12 pt</option><option value="24">24 pt</option>
+              </select>
+            </label>
+          </div>
+        </div>
       </div>
     </header>
     <main id="pages" aria-label="Document pages"></main>
+    <!-- Titles and headings, as in Google Docs' document outline. Shown when there's room. -->
+    <!-- Comment cards beside the text they're about (a drawer when the window is narrow). -->
+    <aside id="comments" aria-label="Comments">
+      <p id="comments-empty">Select text and press Ctrl+Alt+M to comment.</p>
+    </aside>
+    <nav id="outline" aria-labelledby="outline-title">
+      <h2 id="outline-title">Outline</h2>
+      <p id="outline-empty">Headings you add to the document appear here.</p>
+      <ol id="outline-list"></ol>
+    </nav>
+    <!-- Shown under a link while the caret is in it, as in Google Docs. -->
+    <div id="link-bubble" role="dialog" aria-label="Link" hidden>
+      <a id="bubble-url" target="_blank" rel="noopener noreferrer"></a>
+      <button id="bubble-edit" class="text-button" type="button">Edit</button>
+      <button id="bubble-remove" class="text-button" type="button">Remove</button>
+    </div>
     <ul id="table-menu" role="menu" aria-label="Table" hidden>
       <li role="none"><button role="menuitem" data-cmd="insertRowAbove">Insert row above</button></li>
       <li role="none"><button role="menuitem" data-cmd="insertRowBelow">Insert row below</button></li>

@@ -33,6 +33,7 @@ fn style(size: f32) -> TextStyle {
         font_size: size,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     }
 }
 

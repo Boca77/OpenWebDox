@@ -6,14 +6,32 @@
 //! ("largest side", as the editor wraps), top-and-bottom, behind-text or in-front-of-text
 //! wrapping. Rotation, brightness, contrast, transparency, grayscale and alt text carry over;
 //! sepia is approximated with a duotone and negative isn't expressible, so it's left out.
+//!
+//! Underline, strikethrough, colours, highlight (as run shading, which takes any colour; Word's
+//! own highlight has 16) and superscript/subscript carry over; links become hyperlinks.
+//!
+//! Paragraph styles become Word's own (Title, Subtitle, Heading 1–6, with their outline
+//! levels), so Word's navigation pane and table of contents find the headings.
+//!
+//! The header and footer become Word's (`header1.xml`, `footer1.xml`), their page number and
+//! page count fields Word's `PAGE` and `NUMPAGES`.
+//!
+//! Open comments become Word comments (`comments.xml`, with their range marked in the text);
+//! replies follow the comment's text as paragraphs of their own. Resolved comments are left
+//! out.
+//!
+//! Lists become Word numbering (`word/numbering.xml`): one definition per list, so separate
+//! lists restart their numbers as in the editor. Word has no checklists; their items become
+//! bullets drawn as ☐ or ☑.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 
 use opendox_layout::PageGeometry;
 use opendox_model::{
-    Align, Block, CharFormat, Document, ImageProps, ImageRef, Outline, ParagraphFormat, Recolor,
-    SlotFormat, TextRef, Wrap,
+    list_indent, marker_text, Align, Block, CharFormat, Comment, Document, FieldKind, ImageProps,
+    ImageRef, ListFormat, ListKind, Outline, ParagraphFormat, Recolor, Script, SlotFormat,
+    StyleName, TextRef, Wrap, MAX_LIST_LEVEL,
 };
 
 use crate::zip::Zip;
@@ -93,11 +111,32 @@ pub fn docx(doc: &Document, options: &DocxOptions) -> Result<Vec<u8>, ExportErro
     let formats = doc.formats(&outline);
     let fonts = Fonts::new(options.default_font);
     let media = Media::collect(doc, &formats);
+    let lists = Lists::collect(&formats);
+    // Every link target, in first-use order: relationship `rIdLink{n}` (from 1).
+    let mut urls: Vec<String> = Vec::new();
+    for url in formats
+        .iter()
+        .flat_map(|f| &f.runs)
+        .filter_map(|r| r.format.link.as_ref())
+    {
+        if !urls.contains(url) {
+            urls.push(url.clone());
+        }
+    }
+    // Open comments with some text left, numbered for Word in reading order.
+    let comments: Vec<Comment> = doc
+        .comments(&outline)
+        .into_iter()
+        .filter(|c| !c.resolved && c.start < c.end)
+        .collect();
     let cx = Cx {
+        comments: &comments,
+        urls: &urls,
         outline: &outline,
         formats: &formats,
         fonts: &fonts,
         media: &media,
+        lists: &lists,
     };
 
     let mut body = String::new();
@@ -168,9 +207,33 @@ pub fn docx(doc: &Document, options: &DocxOptions) -> Result<Vec<u8>, ExportErro
         body.push_str("<w:p/>");
     }
 
+    // The header and footer, as parts of their own, referenced from the section.
+    let mut margins: Vec<(&str, String)> = Vec::new();
+    let mut refs = String::new();
+    for (kind, range) in [("header", &outline.header), ("footer", &outline.footer)] {
+        if range.is_empty() {
+            continue;
+        }
+        let mut xml = String::new();
+        for i in range.clone() {
+            paragraph(&mut xml, &cx, i);
+        }
+        let root = if kind == "header" { "hdr" } else { "ftr" };
+        let _ = write!(
+            refs,
+            r#"<w:{kind}Reference w:type="default" r:id="rId{kind}"/>"#
+        );
+        margins.push((
+            kind,
+            format!(
+                r#"{XML}<w:{root} xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:a="{A}" xmlns:pic="{PIC}">{xml}</w:{root}>"#
+            ),
+        ));
+    }
+
     let g = &options.page;
     let document = format!(
-        r#"{XML}<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:a="{A}" xmlns:pic="{PIC}"><w:body>{body}<w:sectPr><w:pgSz w:w="{}" w:h="{}"/><w:pgMar w:top="{}" w:right="{}" w:bottom="{}" w:left="{}" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#,
+        r#"{XML}<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:a="{A}" xmlns:pic="{PIC}"><w:body>{body}<w:sectPr>{refs}<w:pgSz w:w="{}" w:h="{}"/><w:pgMar w:top="{}" w:right="{}" w:bottom="{}" w:left="{}" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#,
         twips(g.width),
         twips(g.height),
         twips(g.margin_top),
@@ -179,8 +242,9 @@ pub fn docx(doc: &Document, options: &DocxOptions) -> Result<Vec<u8>, ExportErro
         twips(g.margin_left),
     );
     let styles = format!(
-        r#"{XML}<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr>{}<w:sz w:val="{size}"/><w:szCs w:val="{size}"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style></w:styles>"#,
+        r#"{XML}<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr>{}<w:sz w:val="{size}"/><w:szCs w:val="{size}"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>{}</w:styles>"#,
         fonts.r_fonts(None),
+        style_definitions(),
         size = half_points(options.default_size),
     );
     let title = options.title.map(escape).unwrap_or_default();
@@ -189,12 +253,55 @@ pub fn docx(doc: &Document, options: &DocxOptions) -> Result<Vec<u8>, ExportErro
     );
 
     let mut zip = Zip::default();
-    zip.add("[Content_Types].xml", CONTENT_TYPES.as_bytes());
+    let has_comments = !comments.is_empty();
+    let mut content_types = if lists.order.is_empty() {
+        CONTENT_TYPES.to_owned()
+    } else {
+        CONTENT_TYPES.replace("</Types>", NUMBERING_TYPE)
+    };
+    if has_comments {
+        content_types = content_types.replace(
+            "</Types>",
+            r#"<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#,
+        );
+    }
+    for (kind, _) in &margins {
+        content_types = content_types.replace(
+            "</Types>",
+            &format!(
+                r#"<Override PartName="/word/{kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml"/></Types>"#
+            ),
+        );
+    }
+    zip.add("[Content_Types].xml", content_types.as_bytes());
     zip.add("_rels/.rels", ROOT_RELS.as_bytes());
     zip.add("docProps/core.xml", core.as_bytes());
     zip.add("word/document.xml", document.as_bytes());
     zip.add("word/styles.xml", styles.as_bytes());
     let mut rels = String::from(DOCUMENT_RELS_START);
+    if has_comments {
+        zip.add("word/comments.xml", comments_xml(&comments).as_bytes());
+        rels.push_str(r#"<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>"#);
+    }
+    for (kind, xml) in &margins {
+        zip.add(&format!("word/{kind}1.xml"), xml.as_bytes());
+        let _ = write!(
+            rels,
+            r#"<Relationship Id="rId{kind}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{kind}1.xml"/>"#
+        );
+    }
+    if !lists.order.is_empty() {
+        zip.add("word/numbering.xml", lists.xml(&fonts).as_bytes());
+        rels.push_str(r#"<Relationship Id="rIdNum" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#);
+    }
+    for (n, url) in urls.iter().enumerate() {
+        let _ = write!(
+            rels,
+            r#"<Relationship Id="rIdLink{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#,
+            n + 1,
+            escape(url)
+        );
+    }
     for id in &media.order {
         let m = &media.images[id];
         let _ = write!(
@@ -215,11 +322,93 @@ pub fn docx(doc: &Document, options: &DocxOptions) -> Result<Vec<u8>, ExportErro
 
 /// What writing a paragraph needs.
 struct Cx<'a> {
+    /// Comments to mark; a comment's Word id is its index.
+    comments: &'a [Comment],
+    /// Link targets; a link's relationship is `rIdLink{index + 1}`.
+    urls: &'a [String],
     outline: &'a Outline,
     formats: &'a [SlotFormat],
     fonts: &'a Fonts,
     media: &'a Media,
+    lists: &'a Lists,
 }
+
+/// The document's lists as Word numberings, in first-use order. A checklist's ticked and
+/// unticked items need different bullets, so each gets a numbering of its own.
+struct Lists {
+    /// `(list id, ticked)` → `numId` (from 1).
+    ids: HashMap<(u64, bool), u32>,
+    order: Vec<ListFormat>,
+}
+
+impl Lists {
+    fn collect(formats: &[SlotFormat]) -> Lists {
+        let mut lists = Lists {
+            ids: HashMap::new(),
+            order: Vec::new(),
+        };
+        for l in formats.iter().filter_map(|f| f.paragraph.list) {
+            let key = (l.id, l.checked);
+            if !lists.ids.contains_key(&key) {
+                lists.order.push(l);
+                lists.ids.insert(key, lists.order.len() as u32);
+            }
+        }
+        lists
+    }
+
+    fn num_id(&self, l: &ListFormat) -> Option<u32> {
+        self.ids.get(&(l.id, l.checked)).copied()
+    }
+
+    /// `word/numbering.xml`: an abstract numbering per list (all nine levels), then the
+    /// numberings pointing at them.
+    fn xml(&self, fonts: &Fonts) -> String {
+        let mut out = format!(r#"{XML}<w:numbering xmlns:w="{W}">"#);
+        for (k, l) in self.order.iter().enumerate() {
+            let _ = write!(
+                out,
+                r#"<w:abstractNum w:abstractNumId="{k}"><w:multiLevelType w:val="hybridMultilevel"/>"#
+            );
+            for level in 0..=MAX_LIST_LEVEL {
+                let at = ListFormat { level, ..*l };
+                let (fmt, text) = match l.kind {
+                    ListKind::Number => (
+                        ["decimal", "lowerLetter", "lowerRoman"][usize::from(level % 3)],
+                        format!("%{}.", level + 1),
+                    ),
+                    ListKind::Bullet | ListKind::Check => ("bullet", marker_text(at, 1)),
+                };
+                let (start, first) = list_indent(level);
+                let _ = write!(
+                    out,
+                    r#"<w:lvl w:ilvl="{level}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/><w:lvlText w:val="{}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="{}" w:hanging="{}"/></w:pPr>"#,
+                    escape(&text),
+                    twips(start),
+                    twips(-first),
+                );
+                if fmt == "bullet" {
+                    // Body fonts lack ● ○ ■ ☐ ☑.
+                    let _ = write!(out, "<w:rPr>{}</w:rPr>", fonts.r_fonts(Some(SYMBOL_FONT)));
+                }
+                out.push_str("</w:lvl>");
+            }
+            out.push_str("</w:abstractNum>");
+        }
+        for k in 0..self.order.len() {
+            let _ = write!(
+                out,
+                r#"<w:num w:numId="{}"><w:abstractNumId w:val="{k}"/></w:num>"#,
+                k + 1
+            );
+        }
+        out.push_str("</w:numbering>");
+        out
+    }
+}
+
+/// The font list bullets are drawn in.
+const SYMBOL_FONT: &str = "Noto Sans Symbols 2";
 
 /// One paragraph (`outline.slots[i]`) as `<w:p>`.
 fn paragraph(out: &mut String, cx: &Cx, i: usize) {
@@ -228,20 +417,71 @@ fn paragraph(out: &mut String, cx: &Cx, i: usize) {
     let format = cx.formats.get(i).cloned().unwrap_or_default();
     let in_cell = matches!(slot.container, TextRef::Cell(_));
     out.push_str("<w:p>");
-    paragraph_properties(out, &format.paragraph);
+    let num = format
+        .paragraph
+        .list
+        .and_then(|l| Some((cx.lists.num_id(&l)?, l.level)));
+    paragraph_properties(out, &format.paragraph, num);
+    // Where comments start and end in this paragraph: markers that take no characters.
+    let mut marks: Vec<(usize, String)> = Vec::new();
+    for (n, c) in cx.comments.iter().enumerate() {
+        let (first, last) = (slot.flat, slot.flat_end());
+        if (first..=last).contains(&c.start) {
+            marks.push((
+                c.start - first,
+                format!(r#"<w:commentRangeStart w:id="{n}"/>"#),
+            ));
+        }
+        if (first..=last).contains(&c.end) {
+            marks.push((
+                c.end - first,
+                format!(
+                    r#"<w:commentRangeEnd w:id="{n}"/><w:r><w:commentReference w:id="{n}"/></w:r>"#
+                ),
+            ));
+        }
+    }
     let piece = |out: &mut String, from: usize, to: usize, f: &CharFormat| {
-        // Images split the text: each placeholder becomes a picture.
-        let mut at = from;
-        for r in format
+        // Images, fields and comment marks split the text: each placeholder becomes a picture
+        // or a field; a mark takes no character.
+        let mut objects: Vec<(usize, Obj)> = format
             .images
             .iter()
-            .filter(|r| r.offset >= from && r.offset < to)
-        {
-            text_run(out, &text[at..r.offset], f, cx.fonts);
-            picture(out, cx.media, r, in_cell);
-            at = r.offset + 1;
+            .map(|r| (r.offset, Obj::Image(r)))
+            .chain(
+                format
+                    .fields
+                    .iter()
+                    .map(|fr| (fr.offset, Obj::Field(fr.kind))),
+            )
+            .chain(marks.iter().map(|(o, xml)| (*o, Obj::Mark(xml))))
+            .filter(|(o, _)| *o >= from && *o < to)
+            .collect();
+        objects.sort_by_key(|(o, _)| *o);
+        let mut at = from;
+        for (offset, obj) in objects {
+            linked_run(out, cx, &text[at..offset], f);
+            at = offset;
+            match obj {
+                Obj::Image(r) => {
+                    picture(out, cx.media, r, in_cell);
+                    at += 1;
+                }
+                Obj::Field(kind) => {
+                    // Word fills in the number; the text shown until it does is a placeholder.
+                    let instr = match kind {
+                        FieldKind::PageNumber => "PAGE",
+                        FieldKind::PageCount => "NUMPAGES",
+                    };
+                    let _ = write!(out, r#"<w:fldSimple w:instr=" {instr} ">"#);
+                    text_run(out, &['1'], f, cx.fonts);
+                    out.push_str("</w:fldSimple>");
+                    at += 1;
+                }
+                Obj::Mark(xml) => out.push_str(xml),
+            }
         }
-        text_run(out, &text[at..to], f, cx.fonts);
+        linked_run(out, cx, &text[at..to], f);
     };
     // Formatted runs cover only non-default stretches; the gaps between are plain.
     let mut at = 0;
@@ -256,7 +496,80 @@ fn paragraph(out: &mut String, cx: &Cx, i: usize) {
     if at < text.len() {
         piece(out, at, text.len(), &default);
     }
+    // Marks at the paragraph's very end.
+    for (_, xml) in marks.iter().filter(|(o, _)| *o >= text.len()) {
+        out.push_str(xml);
+    }
     out.push_str("</w:p>");
+}
+
+/// What splits a paragraph's text when writing it.
+enum Obj<'a> {
+    Image(&'a ImageRef),
+    Field(FieldKind),
+    /// Comment range markup, taking no character.
+    Mark(&'a str),
+}
+
+/// `word/comments.xml`: each comment's text, then its replies as paragraphs of their own.
+fn comments_xml(comments: &[Comment]) -> String {
+    let mut out = format!(r#"{XML}<w:comments xmlns:w="{W}">"#);
+    for (n, c) in comments.iter().enumerate() {
+        let initials: String = c
+            .author
+            .split_whitespace()
+            .filter_map(|w| w.chars().next())
+            .collect();
+        let _ = write!(
+            out,
+            r#"<w:comment w:id="{n}" w:author="{}" w:date="{}" w:initials="{}">"#,
+            escape(&c.author),
+            iso_date(c.created),
+            escape(&initials)
+        );
+        let _ = write!(
+            out,
+            r#"<w:p><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+            escape(&c.text)
+        );
+        for r in &c.replies {
+            let _ = write!(
+                out,
+                r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{}: </w:t></w:r><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+                escape(&r.author),
+                escape(&r.text)
+            );
+        }
+        out.push_str("</w:comment>");
+    }
+    out.push_str("</w:comments>");
+    out
+}
+
+/// Milliseconds since the Unix epoch as an ISO 8601 UTC timestamp (`2026-10-25T13:45:00Z`).
+fn iso_date(ms: f64) -> String {
+    let secs = if ms.is_finite() && ms > 0.0 {
+        (ms / 1000.0) as i64
+    } else {
+        0
+    };
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }
 
 /// An image as a `<w:drawing>` run: in line, or anchored to the paragraph. Images in table
@@ -340,19 +653,99 @@ fn emu(pt: f32) -> i64 {
     (f64::from(pt) * 12_700.0).round() as i64
 }
 
-fn paragraph_properties(out: &mut String, f: &ParagraphFormat) {
+/// Word's id and name for a paragraph style (Normal has neither: it's the default).
+fn word_style(s: StyleName) -> Option<(String, String)> {
+    match s {
+        StyleName::Normal => None,
+        StyleName::Title => Some(("Title".into(), "Title".into())),
+        StyleName::Subtitle => Some(("Subtitle".into(), "Subtitle".into())),
+        StyleName::Heading(n) => Some((format!("Heading{n}"), format!("heading {n}"))),
+    }
+}
+
+/// `<w:style>` for every style but Normal: the editor's look for each, and the outline level
+/// Word's navigation pane uses.
+fn style_definitions() -> String {
+    let mut out = String::new();
+    for s in StyleName::ALL {
+        let Some((id, name)) = word_style(s) else {
+            continue;
+        };
+        let look = s.look();
+        let _ = write!(
+            out,
+            r#"<w:style w:type="paragraph" w:styleId="{id}"><w:name w:val="{name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="{}" w:after="{}"/>"#,
+            twips(look.space_before),
+            twips(look.space_after),
+        );
+        if let Some(level) = s
+            .outline_level()
+            .filter(|_| matches!(s, StyleName::Heading(_)))
+        {
+            let _ = write!(out, r#"<w:outlineLvl w:val="{}"/>"#, level - 1);
+        }
+        out.push_str("</w:pPr><w:rPr>");
+        if look.italic {
+            out.push_str("<w:i/><w:iCs/>");
+        }
+        if let Some(c) = look.color {
+            let _ = write!(out, r#"<w:color w:val="{c:06X}"/>"#);
+        }
+        if let Some(size) = look.size {
+            let hp = half_points(size);
+            let _ = write!(out, r#"<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>"#);
+        }
+        out.push_str("</w:rPr></w:style>");
+    }
+    out
+}
+
+/// `<w:pPr>`, children in the schema's order. `num` is the list numbering and level.
+fn paragraph_properties(out: &mut String, f: &ParagraphFormat, num: Option<(u32, u8)>) {
     let d = ParagraphFormat::default();
     if *f == d {
         return;
     }
     out.push_str("<w:pPr>");
+    if let Some((id, _)) = word_style(f.style) {
+        let _ = write!(out, r#"<w:pStyle w:val="{id}"/>"#);
+    }
+    if f.page_break_before {
+        out.push_str("<w:pageBreakBefore/>");
+    }
+    if let Some((id, level)) = num {
+        let _ = write!(
+            out,
+            r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{id}"/></w:numPr>"#
+        );
+    }
+    // The style's spacing where the paragraph sets none, as the editor does.
+    let look = f.style.look();
+    let or = |own: f32, style: f32| if own == 0.0 { style } else { own };
     let _ = write!(
         out,
         r#"<w:spacing w:before="{}" w:after="{}" w:line="{}" w:lineRule="auto"/>"#,
-        twips(f.space_before),
-        twips(f.space_after),
+        twips(or(f.space_before, look.space_before)),
+        twips(or(f.space_after, look.space_after)),
         (240.0 * f.line_spacing).round() as u32,
     );
+    // The list's indent adds to the paragraph's own, as in the editor.
+    let (list_start, list_first) = f.list.map_or((0.0, 0.0), |l| list_indent(l.level));
+    let start = f.indent_start + list_start;
+    let first = f.indent_first + list_first;
+    if start != 0.0 || first != 0.0 || f.indent_end != 0.0 {
+        let _ = write!(
+            out,
+            r#"<w:ind w:left="{}" w:right="{}" {}/>"#,
+            twips(start),
+            twips(f.indent_end),
+            if first < 0.0 {
+                format!(r#"w:hanging="{}""#, twips(-first))
+            } else {
+                format!(r#"w:firstLine="{}""#, twips(first))
+            }
+        );
+    }
     let jc = match f.align {
         Align::Left => None,
         Align::Center => Some("center"),
@@ -364,6 +757,29 @@ fn paragraph_properties(out: &mut String, f: &ParagraphFormat) {
     }
     out.push_str("</w:pPr>");
 }
+
+/// A run, inside a `<w:hyperlink>` if it's linked.
+fn linked_run(out: &mut String, cx: &Cx, text: &[char], f: &CharFormat) {
+    let rel = f
+        .link
+        .as_ref()
+        .and_then(|url| cx.urls.iter().position(|u| u == url));
+    match rel {
+        Some(n) if !text.is_empty() => {
+            let _ = write!(
+                out,
+                r#"<w:hyperlink r:id="rIdLink{}" w:history="1">"#,
+                n + 1
+            );
+            text_run(out, text, f, cx.fonts);
+            out.push_str("</w:hyperlink>");
+        }
+        _ => text_run(out, text, f, cx.fonts),
+    }
+}
+
+/// Link text's look unless it has its own colour, as in Google Docs.
+const LINK_COLOR: &str = "1155CC";
 
 fn text_run(out: &mut String, text: &[char], f: &CharFormat, fonts: &Fonts) {
     if text.is_empty() {
@@ -381,9 +797,35 @@ fn text_run(out: &mut String, text: &[char], f: &CharFormat, fonts: &Fonts) {
         if f.italic {
             out.push_str("<w:i/><w:iCs/>");
         }
+        if f.strike {
+            out.push_str("<w:strike/>");
+        }
+        let color = f
+            .color
+            .as_deref()
+            .map(|c| c.trim_start_matches('#').to_ascii_uppercase())
+            .or_else(|| f.link.is_some().then(|| LINK_COLOR.to_owned()));
+        if let Some(c) = color {
+            let _ = write!(out, r#"<w:color w:val="{}"/>"#, escape(&c));
+        }
         if let Some(size) = f.size {
             let hp = half_points(size);
             let _ = write!(out, r#"<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>"#);
+        }
+        if f.underline || f.link.is_some() {
+            out.push_str(r#"<w:u w:val="single"/>"#);
+        }
+        if let Some(h) = &f.highlight {
+            let _ = write!(
+                out,
+                r#"<w:shd w:val="clear" w:color="auto" w:fill="{}"/>"#,
+                escape(&h.trim_start_matches('#').to_ascii_uppercase())
+            );
+        }
+        match f.script {
+            Script::Normal => {}
+            Script::Super => out.push_str(r#"<w:vertAlign w:val="superscript"/>"#),
+            Script::Sub => out.push_str(r#"<w:vertAlign w:val="subscript"/>"#),
         }
         out.push_str("</w:rPr>");
     }
@@ -469,6 +911,8 @@ const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpeg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#;
 
 const ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#;
+
+const NUMBERING_TYPE: &str = r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
 
 /// The document's relationships up to the images, which follow, then `</Relationships>`.
 const DOCUMENT_RELS_START: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;

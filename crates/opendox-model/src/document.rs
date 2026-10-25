@@ -8,10 +8,10 @@ use loro::{
 };
 
 use crate::error::ModelError;
-use crate::format::{mark_paragraph, CharFormat, CHAR_KEYS, PARAGRAPH_KEYS};
+use crate::format::{mark_paragraph, CharFormat, ParagraphChange, CHAR_KEYS, LINK, PARAGRAPH_KEYS};
 use crate::grapheme;
 use crate::image::IMAGE_MARK;
-use crate::outline::{Outline, TableInput, TextRef};
+use crate::outline::{FootnoteSlots, Outline, TableInput, TextRef};
 use crate::table::{cell_container, CellRef, TableHandle, TABLES, TABLE_MARK, TABLE_PLACEHOLDER};
 
 /// Name of the Loro text container holding the document body.
@@ -126,6 +126,10 @@ impl Document {
         };
         styles.insert(TABLE_MARK.into(), never);
         styles.insert(IMAGE_MARK.into(), never);
+        styles.insert(crate::header::FIELD_MARK.into(), never);
+        styles.insert(crate::footnote::FOOTNOTE_MARK.into(), never);
+        // Typing right after a link isn't part of it.
+        styles.insert(LINK.into(), never);
         for key in PARAGRAPH_KEYS {
             styles.insert(key.into(), never);
         }
@@ -198,7 +202,7 @@ impl Document {
 
     /// Inserts without committing. With `format`, the new text gets exactly that format
     /// instead of the one it would pick up from its neighbours.
-    fn raw_insert(
+    pub(crate) fn raw_insert(
         &self,
         container: &TextRef,
         pos: usize,
@@ -206,16 +210,19 @@ impl Document {
         format: Option<&CharFormat>,
     ) -> Result<(), ModelError> {
         let text = self.container(container)?;
-        let before = text.to_string();
-        check_boundary(&before, pos)?;
+        check_boundary(&text, pos)?;
         let split = s
             .contains('\n')
             .then(|| self.paragraph_format_in(container, pos));
-        let prev = pos.checked_sub(1).and_then(|p| before.chars().nth(p));
-        let next = before.chars().nth(pos);
+        let prev = pos.checked_sub(1).and_then(|p| text.char_at(p).ok());
+        let next = text.char_at(pos).ok();
         let lead = (prev.is_none_or(|c| c == '\n')
             && next.is_some_and(|c| c != '\n' && c != TABLE_PLACEHOLDER))
-        .then(|| self.char_format_in(&text, pos));
+        .then(|| CharFormat {
+            // A link never spreads to text typed before it.
+            link: None,
+            ..self.char_format_in(&text, pos)
+        });
 
         text.insert(pos, s).map_err(crdt)?;
         let n = s.chars().count();
@@ -223,10 +230,25 @@ impl Document {
             self.set_char_format(&text, pos..pos + n, &f)?;
         }
         if let Some(f) = split {
+            // A page break before the paragraph stays with its first piece only.
+            let mut rest = f;
+            rest.apply(ParagraphChange::PageBreakBefore(false));
+            let mut first = true;
             for (i, c) in s.chars().enumerate() {
                 if c == '\n' {
-                    mark_paragraph(&text, pos + i, f)?;
+                    mark_paragraph(&text, pos + i, if first { f } else { rest })?;
+                    first = false;
                 }
+            }
+            // Enter at the end of a ticked checklist item starts an unticked one, and at the
+            // end of a heading or title starts normal text, as in Google Docs.
+            let mut last = rest;
+            if next.is_none_or(|c| c == '\n' || c == TABLE_PLACEHOLDER) {
+                last.apply(ParagraphChange::Checked(false));
+                last.apply(ParagraphChange::Style(crate::style::StyleName::Normal));
+            }
+            if last != f {
+                self.write_paragraph_format(container, pos + n, last)?;
             }
         }
         Ok(())
@@ -245,16 +267,14 @@ impl Document {
             return Ok(());
         }
         let text = self.container(container)?;
-        let s = text.to_string();
-        check_boundary(&s, range.start)?;
-        check_boundary(&s, range.end)?;
+        check_boundary(&text, range.start)?;
+        check_boundary(&text, range.end)?;
         // Joining paragraphs keeps the first one's format, as in Google Docs. Its line break,
         // which held the format, is among the deleted characters.
-        let joins = s
-            .chars()
-            .skip(range.start)
-            .take(range.end - range.start)
-            .any(|c| c == '\n');
+        let joins = text
+            .slice(range.start, range.end)
+            .map_err(crdt)?
+            .contains('\n');
         let first = joins.then(|| self.paragraph_format_in(container, range.start));
         text.delete(range.start, range.end - range.start)
             .map_err(crdt)?;
@@ -362,8 +382,8 @@ impl Document {
 impl Document {
     /// The document's structure: blocks, paragraphs to lay out, and flat positions.
     pub fn outline(&self) -> Outline {
-        let tables = self
-            .placeholders()
+        let (tables, notes) = self.scan_body();
+        let tables = tables
             .into_iter()
             .filter_map(|(placeholder, id)| {
                 let cells = self.table(&id)?.cell_texts();
@@ -374,7 +394,27 @@ impl Document {
                 })
             })
             .collect();
-        Outline::build(&self.text(), tables)
+        let mut o = Outline::build(&self.text(), tables);
+        if self.has_header() {
+            let text = self.container(&TextRef::Header).map(|t| t.to_string());
+            o.header = o.add_region(TextRef::Header, &text.unwrap_or_default());
+        }
+        let end = o.slots.len();
+        o.footer = end..end;
+        if self.has_footer() {
+            let text = self.container(&TextRef::Footer).map(|t| t.to_string());
+            o.footer = o.add_region(TextRef::Footer, &text.unwrap_or_default());
+        }
+        for (reference, id) in self.note_refs(&o, notes) {
+            let text = self.note_text(&id).map(|t| t.to_string());
+            let slots = o.add_region(TextRef::Footnote(id.clone()), &text.unwrap_or_default());
+            o.footnotes.push(FootnoteSlots {
+                id,
+                reference,
+                slots,
+            });
+        }
+        o
     }
 
     /// Inserts a `rows` × `cols` table at body char index `pos` and returns its id. The table
@@ -385,7 +425,7 @@ impl Document {
         }
         let body = self.body();
         let text: Vec<char> = body.to_string().chars().collect();
-        check_boundary(&body.to_string(), pos)?;
+        check_boundary(&body, pos)?;
         let at_paragraph_start = pos == 0 || text.get(pos - 1) == Some(&'\n');
         let lead = if at_paragraph_start { "" } else { "\n" };
         let split = self.paragraph_format_in(&TextRef::Body, pos);
@@ -523,7 +563,10 @@ impl Document {
         b: usize,
     ) -> Result<usize, ModelError> {
         let (lo, hi) = (a.min(b), a.max(b));
-        if lo == hi {
+        // Never across regions: a selection from the body into the footer deletes only the
+        // body part.
+        let hi = hi.min(outline.region_bounds(lo).1);
+        if lo >= hi {
             return Ok(lo);
         }
         let (la, lb) = (outline.locate(lo), outline.locate(hi));
@@ -579,6 +622,9 @@ impl Document {
         let loc = outline.locate(outline.snap(pos));
         let (text, offset) = match &loc.container {
             TextRef::Body => (self.body(), loc.offset),
+            TextRef::Header | TextRef::Footer | TextRef::Footnote(_) => {
+                (self.container(&loc.container)?, loc.offset)
+            }
             TextRef::Cell(c) => match self.existing_cell(c) {
                 Some(text) => (text, loc.offset),
                 // A cell that was never written has no container to anchor to (creating one
@@ -596,11 +642,28 @@ impl Document {
 
     /// Current flat position of an anchor from [`Document::anchor_at`], or `None` if the cell or
     /// table it was in has been deleted. `outline` must describe the current state.
+    /// Whether the character an anchor holds on to still exists (it hasn't been deleted).
+    pub(crate) fn anchor_alive(&self, anchor: &Anchor) -> bool {
+        self.doc
+            .get_cursor_pos(&anchor.0)
+            .is_ok_and(|r| r.update.is_none())
+    }
+
     pub fn resolve_at(&self, outline: &Outline, anchor: &Anchor) -> Option<usize> {
         let pos = self.doc.get_cursor_pos(&anchor.0).ok()?.current.pos;
         let id = &anchor.0.container;
         if *id == self.body().id() {
             return Some(outline.snap(outline.flat_of_body(pos)));
+        }
+        for region in [TextRef::Header, TextRef::Footer] {
+            if self.container(&region).is_ok_and(|t| t.id() == *id) {
+                return outline.flat_in_region(&region, pos);
+            }
+        }
+        for n in &outline.footnotes {
+            if self.note_text(&n.id).is_some_and(|t| t.id() == *id) {
+                return outline.flat_in_region(&TextRef::Footnote(n.id.clone()), pos);
+            }
         }
         for t in outline.tables() {
             let Some(handle) = self.table(&t.id) else {
@@ -655,33 +718,57 @@ impl Document {
 
     /// Body placeholders that refer to an existing table: `(char index, table id)`.
     pub(crate) fn placeholders(&self) -> Vec<(usize, String)> {
-        let mut out: Vec<(usize, String)> = Vec::new();
+        self.scan_body().0
+    }
+
+    /// One pass over the body's placeholders: the tables (as [`Document::placeholders`]) and
+    /// the footnote references, `(char index, note id)`.
+    #[allow(clippy::type_complexity)]
+    fn scan_body(&self) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
+        let mut tables: Vec<(usize, String)> = Vec::new();
+        let mut notes: Vec<(usize, String)> = Vec::new();
         let mut pos = 0;
         for d in self.body().to_delta() {
             let TextDelta::Insert { insert, attributes } = d else {
                 continue;
             };
-            let id = attributes
-                .as_ref()
-                .and_then(|a| a.get(TABLE_MARK))
-                .and_then(|v| v.as_string().map(|s| s.to_string()));
+            let mark = |key: &str| {
+                attributes
+                    .as_ref()
+                    .and_then(|a| a.get(key))
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+            };
+            let table = mark(TABLE_MARK);
+            let note = mark(crate::footnote::FOOTNOTE_MARK);
+            if table.is_none() && note.is_none() {
+                pos += insert.chars().count();
+                continue;
+            }
             for c in insert.chars() {
-                if let (TABLE_PLACEHOLDER, Some(id)) = (c, &id) {
-                    // One placeholder per table; a duplicate would render the table twice.
-                    if self.table(id).is_some() && !out.iter().any(|(_, x)| x == id) {
-                        out.push((pos, id.clone()));
+                if c == TABLE_PLACEHOLDER {
+                    if let Some(id) = &table {
+                        // One placeholder per table; a duplicate would render the table twice.
+                        if self.table(id).is_some() && !tables.iter().any(|(_, x)| x == id) {
+                            tables.push((pos, id.clone()));
+                        }
+                    }
+                    if let Some(id) = &note {
+                        notes.push((pos, id.clone()));
                     }
                 }
                 pos += 1;
             }
         }
-        out
+        (tables, notes)
     }
 
     pub(crate) fn container(&self, r: &TextRef) -> Result<LoroText, ModelError> {
         match r {
             TextRef::Body => Ok(self.body()),
             TextRef::Cell(c) => self.cell(c),
+            TextRef::Header => Ok(self.doc.get_text(crate::header::HEADER)),
+            TextRef::Footer => Ok(self.doc.get_text(crate::header::FOOTER)),
+            TextRef::Footnote(id) => self.note_text(id).ok_or(ModelError::NoSuchFootnote),
         }
     }
 
@@ -715,13 +802,21 @@ fn joinable(prev: &crate::outline::Slot, next: &crate::outline::Slot) -> bool {
     prev.container == next.container && prev.offset + prev.text.chars().count() + 1 == next.offset
 }
 
-fn check_boundary(text: &str, pos: usize) -> Result<(), ModelError> {
-    let b = grapheme::boundaries(text);
-    let len = b.last().copied().unwrap_or(0);
+/// Checks that `pos` is in `text` and on a grapheme boundary, looking only at the text around
+/// it: grapheme clusters are far shorter than the window (the longest real ones, emoji ZWJ
+/// sequences, are a dozen chars), so the cost doesn't grow with the document.
+fn check_boundary(text: &LoroText, pos: usize) -> Result<(), ModelError> {
+    const WINDOW: usize = 64;
+    let len = text.len_unicode();
     if pos > len {
         return Err(ModelError::OutOfBounds { pos, len });
     }
-    if b.binary_search(&pos).is_err() {
+    let start = pos.saturating_sub(WINDOW);
+    let around = text.slice(start, (pos + WINDOW).min(len)).map_err(crdt)?;
+    if grapheme::boundaries(&around)
+        .binary_search(&(pos - start))
+        .is_err()
+    {
         return Err(ModelError::NotGraphemeBoundary { pos });
     }
     Ok(())

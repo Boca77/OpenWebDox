@@ -16,6 +16,8 @@ pub struct SyncClient {
     /// nothing may be sent: we don't yet know what the server is missing.
     server_has: Option<Version>,
     peers: BTreeMap<u32, Presence>,
+    /// The server allows this connection to view only: never send edits.
+    read_only: bool,
 }
 
 /// What a received message changed.
@@ -27,6 +29,8 @@ pub struct Received {
     pub peers_changed: bool,
     /// A message to send back right away.
     pub reply: Option<Vec<u8>>,
+    /// The server says this connection may only view the document.
+    pub read_only: bool,
 }
 
 impl SyncClient {
@@ -48,6 +52,12 @@ impl SyncClient {
     pub fn disconnected(&mut self) {
         self.server_has = None;
         self.peers.clear();
+        self.read_only = false;
+    }
+
+    /// Whether the server allows this connection to view only.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Whether the handshake has finished and edits are flowing.
@@ -61,6 +71,9 @@ impl SyncClient {
         let Some(has) = &mut self.server_has else {
             return Ok(None);
         };
+        if self.read_only {
+            return Ok(None);
+        }
         let now = doc.version();
         if has.includes(&now) {
             return Ok(None);
@@ -92,6 +105,10 @@ impl SyncClient {
             }
             Message::Leave { client } => {
                 out.peers_changed = self.peers.remove(&client).is_some();
+            }
+            Message::ReadOnly => {
+                self.read_only = true;
+                out.read_only = true;
             }
             Message::SyncRequest { .. } => {
                 return Err(SyncError::Malformed("server sent a sync request".into()))

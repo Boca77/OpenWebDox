@@ -61,7 +61,13 @@ async function mouse(type, x, y, buttons = 1) {
 /** Client coordinates of the caret position `pos` (via the engine), in the middle of the line. */
 const clientOf = (pos) =>
   ev(`(() => { const {editor, view} = window.opendox; const r = editor.caret_rect(${pos}, false);
-    const page = view.renderer.pages[r[0]].getBoundingClientRect(); const k = view.renderer.cssPerPt;
+    const k = view.renderer.cssPerPt;
+    // Scroll only if the point is hidden (under the sticky header or below the window), so
+    // positions read earlier stay valid.
+    const top = document.querySelector('header').getBoundingClientRect().bottom;
+    let p = view.renderer.pages[r[0]].getBoundingClientRect(); const cy = p.top + (r[2] + r[3]) / 2 * k;
+    if (cy < top + 8 || cy > innerHeight - 8) { scrollBy(0, cy - (top + innerHeight) / 2); p = view.renderer.pages[r[0]].getBoundingClientRect(); }
+    const page = p;
     return [page.left + r[1] * k, page.top + (r[2] + r[3]) / 2 * k]; })()`);
 const text = () => ev("window.opendox.editor.text()");
 const sel = () => ev("(() => { const s = window.opendox.view.selection; return [s.anchor, s.focus]; })()");
@@ -231,7 +237,7 @@ async function chord(letter, modifiers) {
 const fmt = () => ev("(() => { const s = window.opendox.view.formatState(); return { bold: s.bold, italic: s.italic, align: s.align, font: s.font }; })()");
 /** Font ids drawn on page 0. Demo order: 0 sans, 1 arabic, 2 bold, 3 italic, 4 bold italic, 5-8 serif. */
 const fontsOnPage = () => ev(`(() => { const g = window.opendox.editor.page_glyphs(0); const s = new Set();
-  for (let i = 0; i < g.length; i += 6) s.add(g[i]); return [...s].sort((a, b) => a - b); })()`);
+  for (let i = 0; i < g.length; i += 7) s.add(g[i]); return [...s].sort((a, b) => a - b); })()`);
 const pressed = (id) => ev(`document.getElementById(${JSON.stringify(id)}).getAttribute('aria-pressed') === 'true'`);
 
 // 17. Select "Section", Ctrl+B, undo, redo.

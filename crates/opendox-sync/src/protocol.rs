@@ -10,6 +10,9 @@
 //! 3. then both sides send [`Message::Update`]s as edits happen, and clients send
 //!    [`Message::Presence`] when their caret moves. The server relays presence and sends
 //!    [`Message::Leave`] when a client disconnects.
+//!
+//! A client allowed only to view gets [`Message::ReadOnly`] before the reply; the server
+//! ignores any edits it sends.
 
 use crate::SyncError;
 
@@ -18,6 +21,7 @@ const SYNC_REPLY: u8 = 2;
 const UPDATE: u8 = 3;
 const PRESENCE: u8 = 4;
 const LEAVE: u8 = 5;
+const READ_ONLY: u8 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -32,6 +36,8 @@ pub enum Message {
     Presence { client: u32, payload: Vec<u8> },
     /// Server → client: connection `client` has gone; drop its caret.
     Leave { client: u32 },
+    /// Server → client: this connection may view the document but not edit it.
+    ReadOnly,
 }
 
 impl Message {
@@ -60,6 +66,7 @@ impl Message {
                 w.u8(LEAVE);
                 w.u32(*client);
             }
+            Message::ReadOnly => w.u8(READ_ONLY),
         }
         w.0
     }
@@ -82,6 +89,7 @@ impl Message {
                 payload: r.bytes()?,
             },
             LEAVE => Message::Leave { client: r.u32()? },
+            READ_ONLY => Message::ReadOnly,
             tag => return Err(SyncError::Malformed(format!("unknown message tag {tag}"))),
         };
         r.finish()?;

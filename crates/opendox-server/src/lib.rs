@@ -2,18 +2,25 @@
 //! `opendox-sync` protocol. Documents are kept in memory while open and persisted through a
 //! [`Storage`] (SQLite by default).
 //!
-//! There is no authentication yet: anyone who can reach the server can open any document.
+//! Who may open and edit a document is an [`Authorizer`]'s decision, from a `token` query
+//! parameter: [`serve`] lets everyone in (for development on your own machine), [`serve_with`]
+//! takes the authorizer to use, e.g. [`SignedTokens`].
 
+pub mod auth;
 mod hub;
 pub mod storage;
 
+pub use auth::{Access, AllowAll, Authorizer, SignedTokens};
 pub use hub::{Hub, HubConfig, HubError, Session};
 pub use storage::{MemoryStorage, SqliteStorage, Storage, StorageError, Stored};
 
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -23,30 +30,58 @@ use tokio::net::TcpListener;
 /// Largest message accepted from a client. A paste of a long document is a few MB.
 const MAX_MESSAGE: usize = 32 << 20;
 
-/// The HTTP routes: `GET /doc/{id}` upgrades to a sync WebSocket.
-pub fn router(hub: Arc<Hub>) -> Router {
-    Router::new()
-        .route("/doc/{id}", get(upgrade))
-        .with_state(hub)
+#[derive(Clone)]
+struct AppState {
+    hub: Arc<Hub>,
+    auth: Arc<dyn Authorizer>,
 }
 
-/// Serves sync connections on `listener` until the process ends.
+/// The HTTP routes, letting everyone in: `GET /doc/{id}` upgrades to a sync WebSocket. For
+/// development only; see [`router_with`].
+pub fn router(hub: Arc<Hub>) -> Router {
+    router_with(hub, Arc::new(AllowAll))
+}
+
+/// The HTTP routes: `GET /doc/{id}?token=…` upgrades to a sync WebSocket if `auth` lets the
+/// token open that document, and answers 403 otherwise.
+pub fn router_with(hub: Arc<Hub>, auth: Arc<dyn Authorizer>) -> Router {
+    Router::new()
+        .route("/doc/{id}", get(upgrade))
+        .with_state(AppState { hub, auth })
+}
+
+/// Serves sync connections on `listener`, letting everyone in (development only).
 pub async fn serve(listener: TcpListener, hub: Arc<Hub>) -> std::io::Result<()> {
     axum::serve(listener, router(hub)).await
+}
+
+/// Serves sync connections on `listener`, checking each with `auth`.
+pub async fn serve_with(
+    listener: TcpListener,
+    hub: Arc<Hub>,
+    auth: Arc<dyn Authorizer>,
+) -> std::io::Result<()> {
+    axum::serve(listener, router_with(hub, auth)).await
 }
 
 async fn upgrade(
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
-    State(hub): State<Arc<Hub>>,
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
 ) -> Response {
+    let token = query.get("token").map(String::as_str);
+    let Some(access) = state.auth.authorize(&id, token) else {
+        return (StatusCode::FORBIDDEN, "not allowed to open this document").into_response();
+    };
+    let hub = state.hub;
     ws.max_message_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| connection(socket, hub, id))
+        .on_upgrade(move |socket| connection(socket, hub, id, access))
         .into_response()
 }
 
-async fn connection(socket: WebSocket, hub: Arc<Hub>, doc: String) {
-    let (session, mut outbox) = match hub.join(&doc) {
+async fn connection(socket: WebSocket, hub: Arc<Hub>, doc: String, access: Access) {
+    let (session, mut outbox) = match hub.join_with(&doc, access) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("opendox-server: {doc}: join failed: {e}");

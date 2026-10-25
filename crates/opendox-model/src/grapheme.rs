@@ -17,9 +17,34 @@ pub(crate) fn boundaries(text: &str) -> Vec<usize> {
     out
 }
 
+/// The UAX #29 word segments of `text` as char ranges, each flagged whether it's a word
+/// (holds a letter or digit) rather than spaces or punctuation.
+pub(crate) fn word_segments(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for seg in text.split_word_bounds() {
+        let n = seg.chars().count();
+        out.push((pos..pos + n, seg.chars().any(char::is_alphanumeric)));
+        pos += n;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_follow_uax29() {
+        let segs: Vec<(usize, usize, bool)> = word_segments("can't stop, 3.5 é")
+            .into_iter()
+            .map(|(r, w)| (r.start, r.end, w))
+            .collect();
+        // "can't" is one word, "3.5" one number, punctuation and spaces are not words.
+        assert_eq!(segs[0], (0, 5, true));
+        assert!(segs.contains(&(12, 15, true)));
+        assert!(segs.contains(&(10, 11, false)));
+    }
 
     #[test]
     fn ascii_has_a_boundary_between_every_char() {

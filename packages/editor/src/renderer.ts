@@ -13,6 +13,8 @@ export interface LayoutSource {
   /** SVG path in font units, y down. `undefined` if the glyph is unknown. */
   glyph_path(font: number, face: number, glyph: number): string | undefined;
   units_per_em(font: number, face: number): number;
+  /** Highlights, underlines and strikethroughs on a page, in groups of {@link DECORATION_STRIDE}. */
+  page_decorations(index: number): Float32Array;
   /** Table borders on a page, in groups of {@link RULE_STRIDE}. */
   page_rules(index: number): Float32Array;
   /** Images on a page in drawing order, in groups of {@link OBJECT_STRIDE}. */
@@ -29,8 +31,17 @@ export interface LayoutSource {
  */
 export const OBJECT_STRIDE = 9;
 
-/** Floats per glyph: font id, face index, glyph id, x, y, font size (positions in points). */
-export const GLYPH_STRIDE = 6;
+/**
+ * Floats per glyph: font id, face index, glyph id, x, y, font size (positions in points),
+ * colour (`0xRRGGBB`, or -1 for the default ink).
+ */
+export const GLYPH_STRIDE = 7;
+
+/**
+ * Floats per decoration: kind (0 highlight, 1 underline, 2 strikethrough), x, y, width,
+ * height (a filled rectangle, points), colour as for glyphs. Highlights come first.
+ */
+export const DECORATION_STRIDE = 6;
 
 /** Floats per border line: x0, y0, x1, y1 in points. */
 export const RULE_STRIDE = 4;
@@ -40,14 +51,26 @@ const RULE_WIDTH_PT = 0.75;
 
 const INK = "#1d2129";
 
+/** A layout colour (`0xRRGGBB`, or negative for the default ink) as CSS. */
+function css(color: number): string {
+  return color < 0 ? INK : `#${color.toString(16).padStart(6, "0")}`;
+}
+
 /** CSS pixels per point: CSS defines 1in = 96px = 72pt. */
 const PX_PER_PT = 96 / 72;
 
 export interface RenderStats {
   pages: number;
+  /** Pages painted by this call (the ones on or near the screen); the rest paint when they
+   * scroll into view. */
+  drawn: number;
   glyphs: number;
   ms: number;
 }
+
+/** How far beyond the window (in window heights) pages are painted ahead of being seen, and
+ * kept painted. Pages further away give their canvas memory back. */
+const AHEAD = 1;
 
 /**
  * Draws laid-out pages, one canvas per page.
@@ -57,12 +80,26 @@ export interface RenderStats {
  *
  * Each page is a `.opendox-page` element holding the canvas and an empty `.opendox-overlay`
  * layer above it, where callers can place carets and selection boxes without redrawing text.
+ *
+ * Only pages on or near the screen are painted: every page keeps its size, the others are
+ * marked stale and painted when they scroll near, so a keystroke in a long document costs a
+ * few pages of drawing, not all of them. Pages far off screen release their canvas memory.
  */
 export class PageRenderer {
   private readonly paths = new Map<string, Path2D | null>();
   private readonly emSizes = new Map<string, number>();
   private readonly pageEls: HTMLElement[] = [];
   private readonly images = new ImageCache(() => this.render(this.pageEls.length));
+  /** Pages whose canvas doesn't show the current layout. */
+  private readonly stale = new Set<number>();
+  /** Pages on or near the screen, per the observer. */
+  private readonly near = new Set<number>();
+  private readonly observer: IntersectionObserver | null =
+    typeof IntersectionObserver === "undefined"
+      ? null
+      : new IntersectionObserver((entries) => this.onVisibility(entries), {
+          rootMargin: `${AHEAD * 100}% 0px`,
+        });
   /** A look shown instead of an image's stored one, while a slider is being dragged. */
   lookOverride?: (id: string) => Partial<Look> | undefined;
 
@@ -86,17 +123,27 @@ export class PageRenderer {
     return this.pageEls[page]?.querySelector<HTMLElement>(".opendox-overlay") ?? undefined;
   }
 
-  /** Draws pages `0..pageCount`, reusing page elements from the previous call. */
+  /**
+   * Lays out pages `0..pageCount` (reusing page elements from the previous call) and paints
+   * the ones on or near the screen; the rest are painted when they come near.
+   */
   render(pageCount: number): RenderStats {
     const start = performance.now();
     while (this.pageEls.length > pageCount) {
-      this.pageEls.pop()?.remove();
+      const gone = this.pageEls.pop();
+      if (gone) {
+        this.observer?.unobserve(gone);
+        gone.remove();
+      }
+      this.near.delete(this.pageEls.length);
+      this.stale.delete(this.pageEls.length);
     }
     while (this.pageEls.length < pageCount) {
       const page = document.createElement("div");
       page.className = "opendox-page";
       page.dataset.page = String(this.pageEls.length);
-      page.style.position = "relative";
+      // White until painted, so a page scrolled to quickly never flashes the background.
+      page.style.cssText = "position:relative;background:#fff;";
       const canvas = document.createElement("canvas");
       canvas.setAttribute("aria-hidden", "true");
       canvas.style.display = "block";
@@ -106,22 +153,70 @@ export class PageRenderer {
       page.append(canvas, overlay);
       this.container.append(page);
       this.pageEls.push(page);
+      this.observer?.observe(page);
     }
+    // Every page keeps its size, painted or not, so scrolling and positions stay right.
+    const width = `${this.source.page_width() * this.cssPerPt}px`;
+    const height = `${this.source.page_height() * this.cssPerPt}px`;
     let glyphs = 0;
+    let drawn = 0;
     this.pageEls.forEach((page, i) => {
-      glyphs += this.drawPage(page.querySelector("canvas")!, i);
+      const canvas = page.querySelector("canvas")!;
+      canvas.style.width = width;
+      canvas.style.height = height;
+      this.stale.add(i);
+      if (this.onScreen(page)) {
+        glyphs += this.drawPage(canvas, i);
+        drawn++;
+      }
     });
-    return { pages: pageCount, glyphs, ms: performance.now() - start };
+    return { pages: pageCount, drawn, glyphs, ms: performance.now() - start };
+  }
+
+  /** Paints every stale page now, wherever it is (before printing or a screenshot of all). */
+  paintAll(): void {
+    this.pageEls.forEach((page, i) => {
+      if (this.stale.has(i)) this.drawPage(page.querySelector("canvas")!, i);
+    });
+  }
+
+  /** Whether a page is within {@link AHEAD} window heights of the screen, measured now. */
+  private onScreen(page: HTMLElement): boolean {
+    if (this.near.has(Number(page.dataset.page))) return true;
+    // The observer reports a frame late; measure, so a new page on screen paints right away.
+    const r = page.getBoundingClientRect();
+    const h = window.innerHeight || document.documentElement.clientHeight;
+    return r.bottom >= -AHEAD * h && r.top <= h * (1 + AHEAD);
+  }
+
+  private onVisibility(entries: IntersectionObserverEntry[]): void {
+    for (const e of entries) {
+      const page = e.target as HTMLElement;
+      const i = Number(page.dataset.page);
+      if (e.isIntersecting) {
+        this.near.add(i);
+        if (this.stale.has(i)) this.drawPage(page.querySelector("canvas")!, i);
+      } else {
+        this.near.delete(i);
+        // Far away: give the pixels back; it's painted again when it comes near.
+        const canvas = page.querySelector("canvas")!;
+        canvas.width = 0;
+        canvas.height = 0;
+        this.stale.add(i);
+      }
+    }
   }
 
   private drawPage(canvas: HTMLCanvasElement, index: number): number {
+    this.stale.delete(index);
     const dpr = window.devicePixelRatio || 1;
     const widthPx = Math.round(this.source.page_width() * this.cssPerPt * dpr);
     const heightPx = Math.round(this.source.page_height() * this.cssPerPt * dpr);
-    canvas.width = widthPx;
-    canvas.height = heightPx;
-    canvas.style.width = `${widthPx / dpr}px`;
-    canvas.style.height = `${heightPx / dpr}px`;
+    // Resizing clears and reallocates; only when the size really changed.
+    if (canvas.width !== widthPx || canvas.height !== heightPx) {
+      canvas.width = widthPx;
+      canvas.height = heightPx;
+    }
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return 0;
@@ -133,18 +228,27 @@ export class PageRenderer {
     this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 0);
     this.drawRules(ctx, index, devicePerPt);
     this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 1);
-    ctx.fillStyle = INK;
 
+    // Highlights go under the text, underlines and strikethroughs over it.
+    const decorations = this.source.page_decorations(index);
+    this.drawDecorations(ctx, decorations, devicePerPt, true);
     const data = this.source.page_glyphs(index);
+    let color = NaN;
     for (let i = 0; i < data.length; i += GLYPH_STRIDE) {
       const font = data[i];
       const face = data[i + 1];
       const path = this.path(font, face, data[i + 2]);
       if (!path) continue;
+      if (data[i + 6] !== color) {
+        color = data[i + 6];
+        ctx.fillStyle = css(color);
+      }
       const k = (data[i + 5] / this.emSize(font, face)) * devicePerPt;
       ctx.setTransform(k, 0, 0, k, data[i + 3] * devicePerPt, data[i + 4] * devicePerPt);
       ctx.fill(path);
     }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawDecorations(ctx, decorations, devicePerPt, false);
     this.drawObjects(ctx, objects, devicePerPt, (layer) => layer === 2);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     return data.length / GLYPH_STRIDE;
@@ -185,6 +289,23 @@ export class PageRenderer {
       }
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** Highlights (`behind`) or the underlines and strikethroughs (otherwise). Lines are at
+   * least one device pixel thick so they never vanish at small zoom. */
+  private drawDecorations(
+    ctx: CanvasRenderingContext2D,
+    data: Float32Array,
+    devicePerPt: number,
+    behind: boolean,
+  ): void {
+    for (let i = 0; i < data.length; i += DECORATION_STRIDE) {
+      if ((data[i] === 0) !== behind) continue;
+      const k = devicePerPt;
+      ctx.fillStyle = css(data[i + 5]);
+      const h = behind ? data[i + 4] * k : Math.max(1, data[i + 4] * k);
+      ctx.fillRect(data[i + 1] * k, data[i + 2] * k, data[i + 3] * k, h);
+    }
   }
 
   /** Table borders, snapped to whole device pixels so thin lines stay crisp. */

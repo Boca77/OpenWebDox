@@ -15,13 +15,15 @@ mod pagination;
 mod paragraph;
 
 pub use fonts::{FontId, FontLibrary, GlyphOutline};
-pub use navigation::{CaretRect, PlacedLine, Rect, SelectionRect, TextPosition};
+pub use navigation::{CaretRect, PlacedLine, Rect, SelectionRect, TextPosition, Zone};
 pub use pagination::{
-    BlockInput, Fragment, Layer, Page, PageGeometry, Paginator, ParagraphInput, PlacedGlyph,
-    PlacedObject, Rule, TableInput, BREAK_MARGIN, CELL_PADDING, WRAP_MARGIN,
+    BlockInput, Fragment, Layer, NoteInput, Page, PageGeometry, Paginator, ParagraphInput,
+    PlacedDecoration, PlacedGlyph, PlacedLabel, PlacedObject, Rule, TableInput, BREAK_MARGIN,
+    CELL_PADDING, NOTE_SEPARATOR, WRAP_MARGIN,
 };
 pub use paragraph::{
-    inline_size, Align, CaretStop, Exclusion, Glyph, GlyphRun, LayoutEngine, Line, LineObject,
-    ObjectInput, ObjectMode, ParagraphLayout, ParagraphStyle, StyleSpan, TextStyle, MIN_WRAP_WIDTH,
+    inline_size, Align, CaretStop, Decoration, DecorationKind, Exclusion, FieldKind, Glyph,
+    GlyphRun, LayoutEngine, Line, LineObject, Marker, MarkerLayout, ObjectInput, ObjectMode,
+    ParagraphLayout, ParagraphStyle, ShapedLabel, StyleSpan, TextStyle, MARKER_GAP, MIN_WRAP_WIDTH,
     OBJECT_PLACEHOLDER,
 };

@@ -160,5 +160,163 @@ them inside paragraphs), storing images outside the document (needs a blob servi
 if documents with many photos get too big to sync), wrapping text on both sides (parley
 breaks one span per line).
 
+## D14 — Lists as paragraph formats; numbering computed; markers drawn by layout (2026-10-25)
+- **Model.** A list item is a paragraph whose D11 paragraph format carries `p_list` (bullet /
+  number / check), `p_level` (0–8), `p_list_id` and `p_checked`, next to new `p_ind_start`,
+  `p_ind_end` and `p_ind_first` indents. So Enter copies list membership to the new item and
+  joining keeps the first item's, with no new merge rules, and each key is its own mark so
+  concurrent changes to different keys both survive. Numbers are never stored: `list_markers`
+  counts items per list id in reading order (a level's count resets after a shallower item),
+  so concurrent inserts, deletes and level changes can't leave numbers stale. Applying a list
+  right after an item of the same kind joins that list; anything else gets a fresh id (a hash
+  of a replica-unique id). A list level adds its own indent (0.5 in per level, marker hanging
+  0.25 in) on top of the paragraph's.
+- **Layout (still model-free).** `ParagraphStyle` gained the three indents and
+  `ParagraphInput.marker` takes the marker text and style; layout shapes the marker on its own,
+  puts it on the first line's baseline at `indent_start + indent_first`, and moves the first
+  line's text right if the marker would reach it. Indented paragraphs break lines through the
+  same per-line loop as wrapping around images. `ParagraphLayout.marker` keeps its own text, so
+  PDF export maps its glyphs to text without touching the paragraph's.
+- **Fonts.** Bundled Noto Sans Symbols 2 (OFL, 1.2 MB) for ● ○ ■ ☐ ☑. It is given to markers
+  only (`Editor::set_symbol_font`), never added to the text's family list: as the last
+  fallback it would draw the missing-glyph box for characters no font has (emoji), and its deep
+  descent made those lines taller, moving page breaks.
+- **.docx.** One `abstractNum` + `num` per list (Word continues numbering across `num`s that
+  share an `abstractNum`); a checklist gets one per ticked state, since bullets are per level.
+Rejected: storing numbers (stale after concurrent edits); lists as their own containers
+(needs re-linking after concurrent splits, like D11's rejected paragraph records); the editor
+computing markers in TypeScript (PDF export needs them in Rust too).
+
+## D15 — More character formats as marks; layout draws decorations (2026-10-25)
+- **Model.** `underline`, `strike`, `color` and `highlight` (`#rrggbb`), `script` (`super` /
+  `sub`) and `link` (URL) are rich-text marks like D11's, each its own key so concurrent
+  changes merge per property. Links are configured `ExpandType::None`, so typing just after
+  (or just before) a link never extends it; typing inside one does. Text typed at a
+  paragraph's start copies the next character's format but never its link.
+- **Layout (still model-free).** `TextStyle` carries colour, highlight, underline,
+  strikethrough and a baseline shift. Colour, highlight and shift ride in parley's style
+  "brush"; underline/strikethrough use parley's decorations, so their offset and thickness
+  come from each font's own metrics. Lines return decoration rectangles; glyph runs return
+  their colour. A style change splits a shaped run into pieces; each piece's glyph→text
+  mapping is its slice of the whole run's (visual order), so PDF text extraction is unchanged.
+  Super/subscript are the caller's choice of size and shift (wasm: 65 % size, raised 33 % /
+  lowered 14 % of the text's size, as in Word); the shift moves glyphs and decorations only,
+  never carets or line height.
+- **Look decided above layout.** Link blue + underline, and grey + strikethrough for ticked
+  checklist items, are applied where the wasm layer turns formats into `TextStyle`s, so the
+  model stores only what the user chose and export can make its own mapping.
+- **Exports.** PDF: run colours as fill colour, highlights before the text, lines after, link
+  annotations over the link text's selection boxes. .docx: highlight as run shading
+  (`w:shd`), since `w:highlight` allows only 16 named colours.
+Rejected: drawing decorations in the renderer from glyph boxes (PDF export would need the same
+logic again, and fonts' underline metrics would be lost); a link as an object holding text
+(splits, joins and concurrent typing would need special rules marks already give).
+
+## D16 — Paragraph styles by name, looks from one table (2026-10-25)
+- A paragraph's style is one more D11 paragraph key, `p_style` = `title` / `subtitle` /
+  `h1`…`h6` (absent for normal text). The model stores only the name; `StyleName::look()`
+  holds Google Docs' default size, colour, slant and spacing for each, so every replica,
+  the editor and both exports agree, and the looks can change later without migrating data.
+- The look is a paragraph's *base*: text with its own size or colour keeps it. Spacing from
+  the style applies where the paragraph's own is 0 (the stored default), so no "unset" state
+  is needed in the model.
+- Enter at the end of a heading or title gives normal text (Google Docs); inside one, both
+  halves keep the style (D11 split rule).
+- Bookmarks: PDF outline items nested by level (title 0 above headings 1–6), each opening
+  its heading's page at its height. .docx: Word's built-in style ids (`Heading1`, `Title`…)
+  with `w:outlineLvl`, so Word treats them as real headings.
+Rejected: storing size/colour on each heading's text (a style change would need rewriting
+marks over the text, and Word export couldn't tell a heading from big text).
+
+## D17 — Page breaks, page setup, headers and footers (2026-10-25)
+- **Page break** is a paragraph key, `p_break` (starts on a new page). Splitting keeps it on
+  the first piece only; Ctrl+Enter is one raw insert plus the key under a single commit, so
+  it's one undo step. Backspace at the start of such a paragraph removes the break first.
+- **Page setup** lives in the document (`page` map, one key per size/margin), so everyone
+  sees the same pages and concurrent changes to different margins merge. A combination that
+  leaves under 0.5 in for text (possible after merging) reads as the default rather than
+  laying text out in no room.
+- **Headers and footers** are separate rich-text containers (`header`, `footer`), present
+  when the `page` map's `header`/`footer` flag is set (so an empty one exists and removing
+  one is one change that also clears its text). In the flat position space they are regions
+  after the body: header from body end + 1, footer after it. Arrow keys, Ctrl+A, Ctrl+Home/
+  End, selections and deletes stay inside a region.
+- **Fields** (page number, page count) are the object placeholder marked `field`; the model
+  never stores a number. Layout knows the pages, so it lays out the header and footer after
+  the body and gives each field an in-line box sized for the widest number (Noto's digits
+  share one width), then each page draws its own number in it. One paragraph layout serves
+  every page; only the number glyphs differ.
+- A header/footer paragraph is placed on every page; navigation needs one copy, so the
+  paginator keeps a per-page index and a "margin page" (the page last clicked) that carets,
+  selections and Up/Down use.
+Rejected: substituting the number into the paragraph text per page (byte offsets would
+differ per page and break caret mapping); a header per page in the model (Google Docs and
+Word have one per section, edited once).
+
+## D18 — Clipboard: a JSON clip, carried inside ordinary HTML (2026-10-25)
+- Copy turns the selection into a `Clip` (paragraphs: text, character runs, paragraph format
+  incl. style and list) in the model, so what's copied is exactly what's stored. The clipboard
+  gets plain text and HTML; the HTML has normal tags and inline styles (so Google Docs, Word
+  and mail clients keep the formatting) and the clip's JSON in a `data-opendox-clip`
+  attribute, so pasting between opendox documents (even across browsers, where custom MIME
+  types don't survive) loses nothing.
+- Paste is one model change (one undo step): the text goes in with an exact default format
+  (never the neighbours'), then each run's format and, for paragraphs the paste fills, the
+  paragraph format. List ids are remapped to fresh lists so pasted items don't join or
+  renumber lists already in the document.
+- HTML from other apps is converted in the editor (DOM parsing is the browser's job), into
+  the same JSON, keeping what the model can hold. `serde_json` was already compiled in by
+  Loro, so the format costs no bundle size.
+Rejected: a binary or Loro-snapshot clipboard (not readable by other apps, and pasting a
+snapshot would import foreign history); per-character HTML spans (huge clipboards).
+
+## D19 — Access by signed tokens; view-only sessions; a copy on the device (2026-10-25)
+- Authorization is a trait (`Authorizer`, as D4 planned) asked once per WebSocket with the
+  document id and a `token` query parameter (browsers can't set WebSocket headers). The sync
+  server keeps no users: an application decides who may open what and issues HMAC-SHA256
+  signed tokens naming the document (or `*`), view or edit, and an expiry. Signature checks
+  are constant-time (RustCrypto `hmac`/`sha2`; no hand-rolled crypto).
+- Safe by default: no secret means everyone can edit everything, so the server then refuses
+  any address but localhost unless `--insecure` says that's intended.
+- View-only is enforced on the server (edits refused) and mirrored in the client: a
+  `ReadOnly` protocol message makes the sync client stop sending and the engine refuse local
+  edits in its single `begin()` gate, which every edit already passes through.
+- Offline edits survive closing the tab through a full snapshot in IndexedDB, merged into
+  the engine before connecting; the D10 handshake already sends whatever the server lacks,
+  so no separate queue is needed.
+Rejected: user accounts and passwords in the sync server (that's the embedding app's job);
+storing only unsent updates locally (needs tracking what the server acknowledged across
+sessions; a snapshot is simpler and also gives offline reading).
+
+## D20 — Emoji bundled, CJK fonts downloaded on demand (2026-10-25)
+- Noto Emoji (monochrome, OFL, 2 MB) is bundled: emoji are common in any document, and its
+  outlines go through the D8 path renderer unchanged. Colour emoji stay open.
+- CJK fonts are too big for the repo (static Noto Sans SC 8.3 MB, JP 4.5, KR 4.6), so a
+  script downloads them from the noto-cjk project and they're git-ignored. Google Fonts'
+  variable versions were rejected: their default instance is Thin, and the renderer draws
+  default-instance outlines.
+- The library stays font-agnostic (D3): the engine reports `missing_chars()` after layout and
+  the app decides what to fetch. The demo loads a CJK font only when that report has
+  characters it covers, re-checking after each load (JP also covers Han).
+Rejected: adding fallback fonts to the family list up front (a last-resort font's metrics
+change line heights of uncovered text, D14); WOFF2 subsets (the font library reads OpenType
+only).
+
+## D21 — Comments as records with cursor ranges (2026-10-25)
+- Each comment is a Loro map in `comments`: start and end as encoded CRDT cursors, author,
+  text, time, `resolved`, and a list of replies — one key per field, so concurrent replies,
+  edits and resolves merge. Rejected: a mark per comment (marks need their keys configured
+  up front, and one key per comment id doesn't fit), and one shared `comment` mark (overlap
+  would need set-valued marks).
+- The start cursor holds the range's first character and the end cursor its last, so text
+  typed just outside the range stays outside (Google Docs). When the end cursor's character
+  is deleted, it resolves to where that character was, which is the range's end; once all
+  the text is gone the range is empty but the comment stays.
+- Highlighting is decided where formats become `TextStyle`s (as for links): commented
+  stretches get a highlight colour unless they have their own, so layout, the renderer and
+  the PDF need nothing new.
+- .docx: comments are Word comments with range markup; threading (`commentsExtended`) and
+  resolved state aren't written yet.
+
 ## Open
 - Colour emoji rendering.

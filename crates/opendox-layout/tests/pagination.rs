@@ -19,6 +19,7 @@ fn style(size: f32) -> TextStyle {
         font_size: size,
         font_weight: 400.0,
         italic: false,
+        ..TextStyle::default()
     }
 }
 
@@ -31,6 +32,7 @@ fn inputs<'a>(texts: &'a [String], base: &'a TextStyle) -> Vec<ParagraphInput<'a
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         })
         .collect()
 }
@@ -127,6 +129,7 @@ fn line_taller_than_page_gets_its_own_page() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         },
         ParagraphInput {
             text: &texts[1],
@@ -134,6 +137,7 @@ fn line_taller_than_page_gets_its_own_page() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         },
         ParagraphInput {
             text: &texts[2],
@@ -141,6 +145,7 @@ fn line_taller_than_page_gets_its_own_page() {
             spans: &[],
             style: ParagraphStyle::default(),
             objects: &[],
+            marker: None,
         },
     ];
     let mut p = Paginator::new(PageGeometry::letter());
@@ -195,4 +200,30 @@ fn changing_page_width_reshapes_everything() {
     p.set_geometry(PageGeometry::a4());
     p.layout(&mut eng, &inputs(&texts, &base));
     assert_eq!(p.last_shaped_count(), 10);
+}
+
+#[test]
+fn page_break_before_starts_a_new_page_but_never_an_empty_one() {
+    let mut eng = engine();
+    let base = style(12.0);
+    let texts: Vec<String> = ["one", "two", "three"].map(String::from).to_vec();
+    let mut paras = inputs(&texts, &base);
+    let broken = ParagraphStyle {
+        page_break_before: true,
+        ..ParagraphStyle::default()
+    };
+    paras[1].style = broken;
+    // Already at the top of a page: no extra page.
+    paras[0].style = broken;
+    let mut p = Paginator::new(PageGeometry::letter());
+    let pages = p.layout(&mut eng, &paras);
+    assert_eq!(pages.len(), 2);
+    assert_eq!(
+        pages
+            .iter()
+            .map(|pg| pg.fragments.iter().map(|f| f.paragraph).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        [vec![0], vec![1, 2]]
+    );
+    assert_eq!(pages[1].fragments[0].top, 72.0);
 }
